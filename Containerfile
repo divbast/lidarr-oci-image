@@ -21,7 +21,13 @@ ARG LIDARR_COMMIT=6e8ac277abb214e39dd330db7c1685676d9a987f
 # nightly line stops here until the image moves to stable: CLAUDE.md,
 # 'Moving to stable'. 0.0.0.0 stands for none.
 # LIDARR_STABLE_V4=0.0.0.0
-# The runtime: Docker Hardened Images' ASP.NET Core on Debian 13, with ICU,
+# FFmpeg, built from source for Lidarr's plugins: Renovate moves these two
+# in one PR, from FFmpeg's release tags, and its regex needs them adjacent
+# and in this order. The ffmpeg stage fetches the commit and asserts the
+# tag still names it.
+ARG FFMPEG_VERSION=n9.0.2
+ARG FFMPEG_COMMIT=946fcce07b6dcd0331c8cc609192aeff5e1924f8
+# The runtime:Docker Hardened Images' ASP.NET Core on Debian 13, with ICU,
 # OpenSSL and the .NET runtime the app runs on, no shell and no package
 # manager, and its nonroot user 65532. The app is built framework-dependent,
 # so a rebuild of this image patches the runtime. CI verifies its signature
@@ -185,6 +191,123 @@ RUN CGO_ENABLED=0 GOFLAGS=-mod=readonly GOTOOLCHAIN=local \
     go build -trimpath -ldflags "-s -w -X main.version=${LIDARR_VERSION}" \
     -o /out/divbast-lidarr ./cmd/divbast-lidarr
 
+# ffmpeg and ffprobe, which Lidarr itself never runs and its plugins do:
+# Tubifarry, among others, transcodes downloads with them, and finds them
+# on PATH rather than fetching a build of its own into /config. The Go
+# -dev image, which the probe stage already pulls, has gcc, make, readelf,
+# git and apt, with Docker Hardened Images' own Debian repository beside
+# Debian's.
+FROM dhi.io/golang:1.27.4-debian13-dev@sha256:bbe3b7b16af656cce4faf1b2e8410bf939bd11c92a22036425b35c084e729843 AS ffmpeg
+ARG FFMPEG_VERSION
+ARG FFMPEG_COMMIT
+ARG TARGETARCH
+SHELL ["/bin/bash", "-euo", "pipefail", "-c"]
+# The codec libraries for MP3, Opus and Vorbis, which FFmpeg cannot encode
+# well alone: it has no MP3 encoder, and its own Opus and Vorbis encoders
+# are experimental. Each is pinned, one name=version a line, which
+# Renovate's manager reads, to a +dhi build, which only DHI's repository
+# has, so apt never falls back to Debian's. DHI deletes a superseded
+# build, so a pin can fail the build until Renovate's PR moves it; these
+# packages rarely change. Each library's .so link is removed, leaving its
+# static archive for the linker, so the codecs link into the binaries:
+# the runtime base carries none of them. glibc and zlib stay shared, from
+# the base, where the scan and DHI's VEX cover them.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        libmp3lame-dev=3.100-6+deb13u0+dhi0 \
+        libogg-dev=1.3.5-3+deb13u0+dhi0 \
+        libopus-dev=1.5.2-2+deb13u0+dhi0 \
+        libvorbis-dev=1.3.7-3+deb13u0+dhi0 \
+        pkgconf=1.8.1-4+deb13u0+dhi1 \
+        zlib1g-dev=1:1.3.dfsg+really1.3.1-1+deb13u1+dhi0 \
+    && rm -rf /var/lib/apt/lists/* \
+    && lib=/usr/lib/$(gcc -dumpmachine) \
+    && for name in mp3lame ogg opus vorbis vorbisenc; do \
+        test -f "${lib}/lib${name}.a"; \
+        rm "${lib}/lib${name}.so"; \
+    done
+# Fetched by commit, which git checks against its hash, and the tag asked
+# for separately, peeled, since FFmpeg's are annotated, so a tag moved
+# upstream fails the build. FFmpeg signs its tags; the image does not
+# check the signature, since a new key would be a pin a person moves, and
+# the commit pin already fixes the content. .git goes once checked, so
+# FFmpeg's version script reads the version from RELEASE instead of
+# naming the shallow clone's commit.
+RUN retry() { \
+        for delay in 10 30 90; do "$@" && return 0; sleep "${delay}"; done; \
+        "$@"; \
+    }; \
+    git init -q /src; \
+    git -C /src remote add origin https://github.com/FFmpeg/FFmpeg.git; \
+    retry git -C /src fetch -q --depth 1 origin "${FFMPEG_COMMIT}"; \
+    git -C /src checkout -q --detach FETCH_HEAD; \
+    head=$(git -C /src rev-parse HEAD); \
+    test "${head}" = "${FFMPEG_COMMIT}"; \
+    retry git -C /src ls-remote origin \
+        "refs/tags/${FFMPEG_VERSION}" "refs/tags/${FFMPEG_VERSION}^{}" >/tmp/tag; \
+    tagged=$(awk -v tag="refs/tags/${FFMPEG_VERSION}" \
+        '$2 == tag "^{}" { peeled = $1 } $2 == tag { plain = $1 } END { print (peeled != "" ? peeled : plain) }' /tmp/tag); \
+    if [[ "${tagged}" != "${FFMPEG_COMMIT}" ]]; then \
+        echo "tag ${FFMPEG_VERSION} names '${tagged}', the Containerfile pins ${FFMPEG_COMMIT}" >&2; \
+        exit 1; \
+    fi; \
+    rm -rf /src/.git
+WORKDIR /src
+# Static, everything off, then only what the plugins use: the two
+# programs; the file and pipe protocols; every demuxer, parser and
+# bitstream filter, so ffprobe reads whatever a download is; every audio
+# decoder FFmpeg has natively, and the image decoders cover art comes in,
+# and no video decoder but the VP8 one WebP's selects, since decoders are
+# where FFmpeg's CVEs live, and the scan cannot see what is linked in; the
+# encoders and muxers of the formats the plugins write; and the two
+# filters they ask for. The decoder list is n9.0.2's configure
+# --list-decoders cut to those that decode audio, without the ones that
+# need a platform (AudioToolbox, MediaCodec) or an external library, and
+# those FFmpeg builds only with --enable-gpl, which this build has not. No
+# network, no devices, nothing found by autodetection, so nothing links
+# but what is named; no --enable-gpl, so the build is LGPL-2.1-or-later.
+# nasm is not in DHI's repository, so amd64 builds without FFmpeg's
+# hand-written x86 assembly; arm64's needs none.
+RUN case "${TARGETARCH}" in \
+        amd64) asm=--disable-x86asm ;; \
+        arm64) asm= ;; \
+        *) echo "no FFmpeg build for ${TARGETARCH}" >&2; exit 1 ;; \
+    esac; \
+    audio=aac,aac_fixed,aac_latm,ac3,ac3_fixed,acelp_kelvin,adpcm_4xm,adpcm_adx,adpcm_afc,adpcm_agm,adpcm_aica,adpcm_argo,adpcm_ct,adpcm_dtk,adpcm_ea,adpcm_ea_maxis_xa,adpcm_ea_r1,adpcm_ea_r2,adpcm_ea_r3,adpcm_ea_xas; \
+    audio+=,adpcm_g722,adpcm_g726,adpcm_g726le,adpcm_ima_acorn,adpcm_ima_alp,adpcm_ima_amv,adpcm_ima_apc,adpcm_ima_apm,adpcm_ima_cunning,adpcm_ima_dat4,adpcm_ima_dk3,adpcm_ima_dk4,adpcm_ima_ea_eacs,adpcm_ima_ea_sead; \
+    audio+=,adpcm_ima_iss,adpcm_ima_moflex,adpcm_ima_mtf,adpcm_ima_oki,adpcm_ima_qt,adpcm_ima_rad,adpcm_ima_smjpeg,adpcm_ima_ssi,adpcm_ima_wav,adpcm_ima_ws,adpcm_ima_xbox; \
+    audio+=,adpcm_ms,adpcm_mtaf,adpcm_psx,adpcm_sanyo,adpcm_sbpro_2,adpcm_sbpro_3,adpcm_sbpro_4,adpcm_swf,adpcm_thp,adpcm_thp_le,adpcm_vima,adpcm_xa,adpcm_xmd,adpcm_yamaha,adpcm_zork; \
+    audio+=,alac,als,amrnb,amrwb,anull,apac,ape,aptx,aptx_hd,atrac1,atrac3,atrac3al,atrac3p,atrac3pal,atrac9,binkaudio_dct,binkaudio_rdft,bmv_audio,bonk,cbd2_dpcm,comfortnoise,cook,dca,derf_dpcm,dfpwm,dolby_e; \
+    audio+=,dsd_lsbf,dsd_lsbf_planar,dsd_msbf,dsd_msbf_planar,dsicinaudio,dss_sp,dst,dvaudio,eac3,eightsvx_exp,eightsvx_fib,evrc,fastaudio,ffwavesynth,flac,ftr,g723_1,g728,g729,gremlin_dpcm,gsm,gsm_ms,hca,hcom,iac,ilbc,imc; \
+    audio+=,interplay_acm,interplay_dpcm,mace3,mace6,metasound,misc4,mlp,mp1,mp1float,mp2,mp2float,mp3,mp3adu,mp3adufloat,mp3float,mp3on4,mp3on4float,mpc7,mpc8,msnsiren,nellymoser,on2avc,opus,osq,paf_audio; \
+    audio+=,pcm_alaw,pcm_bluray,pcm_dvd,pcm_f16le,pcm_f24le,pcm_f32be,pcm_f32le,pcm_f64be,pcm_f64le,pcm_lxf,pcm_mulaw,pcm_s16be,pcm_s16be_planar,pcm_s16le,pcm_s16le_planar,pcm_s24be,pcm_s24daud,pcm_s24le,pcm_s24le_planar; \
+    audio+=,pcm_s32be,pcm_s32le,pcm_s32le_planar,pcm_s64be,pcm_s64le,pcm_s8,pcm_s8_planar,pcm_sga,pcm_u16be,pcm_u16le,pcm_u24be,pcm_u24le,pcm_u32be,pcm_u32le,pcm_u8,pcm_vidc,qcelp,qdm2,qdmc,qoa,ra_144,ra_288,ralf,rka; \
+    audio+=,roq_dpcm,s302m,sbc,sdx2_dpcm,shorten,sipr,siren,smackaud,sol_dpcm,speex,tak,truehd,truespeech,tta,twinvq,vmdaudio,vorbis,wady_dpcm,wavarc,wavpack,wmalossless,wmapro,wmav1,wmav2,wmavoice,ws_snd1,xan_dpcm,xma1,xma2; \
+    pcm=pcm_alaw,pcm_bluray,pcm_dvd,pcm_f32be,pcm_f32le,pcm_f64be,pcm_f64le,pcm_mulaw,pcm_s16be,pcm_s16be_planar,pcm_s16le,pcm_s16le_planar,pcm_s24be,pcm_s24daud,pcm_s24le,pcm_s24le_planar,pcm_s32be,pcm_s32le; \
+    pcm+=,pcm_s32le_planar,pcm_s64be,pcm_s64le,pcm_s8,pcm_s8_planar,pcm_u16be,pcm_u16le,pcm_u24be,pcm_u24le,pcm_u32be,pcm_u32le,pcm_u8,pcm_vidc; \
+    ./configure \
+        --disable-everything --disable-autodetect --disable-network --disable-avdevice \
+        --disable-programs --enable-ffmpeg --enable-ffprobe --disable-doc --disable-debug \
+        --enable-static --disable-shared --pkg-config-flags=--static \
+        --enable-zlib --enable-libmp3lame --enable-libopus --enable-libvorbis \
+        --enable-protocol=file,pipe --enable-demuxers --enable-parsers --enable-bsfs \
+        "--enable-decoder=${audio},mjpeg,png,bmp,gif,webp,tiff" \
+        "--enable-encoder=aac,alac,flac,wmav2,mjpeg,libmp3lame,libopus,libvorbis,${pcm}" \
+        --enable-muxer=ipod,mp4,mov,mp3,ogg,opus,flac,wav,aiff,adts,ac3,eac3,asf,matroska,webm,image2 \
+        --enable-filter=aresample,scale \
+        ${asm:+"${asm}"}
+# make writes ffmpeg and ffprobe stripped, beside the _g builds it keeps
+# symbols in.
+RUN make -j"$(nproc)" \
+    && install -d /out \
+    && install -m 0755 -t /out ffmpeg ffprobe
+COPY test/ffmpeg-check.sh /tmp/ffmpeg-check.sh
+# The check reads /out, which the runtime stage copies both binaries
+# from, once nothing more is written there, so what it passes is what
+# ships: each answers as itself, ffmpeg has the three library encoders,
+# and neither needs a shared library the runtime base lacks.
+RUN /tmp/ffmpeg-check.sh /out
+
 FROM ${RUNTIME_IMAGE}
 ARG LIDARR_VERSION
 
@@ -196,6 +319,8 @@ COPY --from=backend /out/package_info /app/package_info
 # copies it into the tarball's Lidarr/ folder, which is this /app/bin
 COPY --from=fetch /src/LICENSE.md /app/bin/LICENSE.md
 COPY --from=probe /out/divbast-lidarr /usr/local/bin/divbast-lidarr
+# On the base's PATH, for the plugins that look for them there
+COPY --from=ffmpeg /out/ffmpeg /out/ffprobe /usr/local/bin/
 # The data directory, empty and uid 65532's, and not a VOLUME: a new named
 # volume mounted here takes its owner from it, so Lidarr can write to it.
 COPY --from=backend --chown=65532:65532 /out/config /config
