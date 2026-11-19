@@ -1,4 +1,134 @@
 {
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
-  "extends": ["github>divbast/renovate-config", "github>divbast/renovate-config:app"]
+  "extends": [
+    "github>divbast/renovate-config",
+    "github>divbast/renovate-config:app"
+  ],
+  "customDatasources": {
+    "lidarr-nightly": {
+      "description": "Lidarr's nightly builds: every build of develop that upstream's CI completes, from Azure DevOps' public build API, the one source that pairs a nightly's version with its commit. Lidarr 4 publishes nothing on GitHub until it is stable. Only CI builds of refs/heads/develop that succeeded are asked for, never a pull request's build, whose numbers come from the same counter. The transform gives releases alone: each a version, the commit it was built from as its digest, and when it finished. JSONata collapses a one-element list to its element, so the list is built in brackets, and stays a list whatever Azure answers.",
+      "defaultRegistryUrlTemplate": "https://dev.azure.com/Lidarr/Lidarr/_apis/build/builds?definitions=1&branchName=refs/heads/develop&resultFilter=succeeded&reasonFilter=individualCI,batchedCI&$top=50&api-version=7.1",
+      "transformTemplates": [
+        "{\"releases\": [value.{\"version\": buildNumber, \"digest\": sourceVersion, \"releaseTimestamp\": finishTime}]}"
+      ]
+    }
+  },
+  "customManagers": [
+    {
+      "customType": "regex",
+      "description": "ARG LIDARR_VERSION and the ARG LIDARR_COMMIT beneath it, captured together so one PR moves both. The dockerfile manager only reads an ARG that a FROM expands, and these feed the fetch stage's checkout. The datasource is Lidarr's nightlies, each a version and the commit it was built from, which the fetch stage checks out. The versioning compares all four numbers, which semver cannot read. Nightlies from before v4, which the API also lists, are older than any v4 pin, so they are never offered. The two ARGs must stay adjacent and in this order.",
+      "managerFilePatterns": [
+        "/^Containerfile$/"
+      ],
+      "matchStrings": [
+        "ARG LIDARR_VERSION=(?<currentValue>\\S+)\\nARG LIDARR_COMMIT=(?<currentDigest>[0-9a-f]{40})"
+      ],
+      "depNameTemplate": "Lidarr/Lidarr",
+      "datasourceTemplate": "custom.lidarr-nightly",
+      "versioningTemplate": "regex:^(?<major>\\d+)\\.(?<minor>\\d+)\\.(?<patch>\\d+)\\.(?<build>\\d+)$",
+      "autoReplaceStringTemplate": "ARG LIDARR_VERSION={{{newValue}}}\nARG LIDARR_COMMIT={{{newDigest}}}"
+    },
+    {
+      "customType": "regex",
+      "description": "The watch for Lidarr's first stable v4 release: the Containerfile's '# LIDARR_STABLE_V4=' line, which no build reads. It sits in the Containerfile because the recommended preset ignores every path under test/. It reads Lidarr's GitHub releases, never its tags, which also hold Sonarr's and Radarr's and cannot tell a develop build from a stable one, offered only those GitHub calls stable and of v4 or later (the rule below), so neither a v3 pre-release nor a last v3 stable moves it; then test/stable's TestNoV4StableYet fails its pull request with the steps in CLAUDE.md, 'Moving to stable'. Its floor, 0.0.0.0, shares no major, minor and patch with any release: Renovate offers a pre-release that shares all three with the current version. github-releases looks a release up by its tag's own name, v4.0.0.N, so currentValueTemplate adds the v to the version Renovate compares, and autoReplaceStringTemplate takes it off again when it writes the line back. The versioning compares all four numbers.",
+      "managerFilePatterns": [
+        "/^Containerfile$/"
+      ],
+      "matchStrings": [
+        "# LIDARR_STABLE_V4=(?<currentValue>[0-9.]+)"
+      ],
+      "depNameTemplate": "Lidarr v4 stable",
+      "packageNameTemplate": "Lidarr/Lidarr",
+      "datasourceTemplate": "github-releases",
+      "currentValueTemplate": "v{{{currentValue}}}",
+      "versioningTemplate": "regex:^v(?<major>\\d+)\\.(?<minor>\\d+)\\.(?<patch>\\d+)\\.(?<build>\\d+)$",
+      "autoReplaceStringTemplate": "# LIDARR_STABLE_V4={{{replace '^v' '' newValue}}}"
+    },
+    {
+      "customType": "regex",
+      "description": "ARG FFMPEG_VERSION and the ARG FFMPEG_COMMIT beneath it, captured together so one PR moves both, from FFmpeg's tags. Its digest is the commit the tag names, which the ffmpeg stage checks out and asserts the tag still names. The versioning reads release tags alone, n9.0.2 or n9.1, so a development tag such as n9.1-dev never matches. The two ARGs must stay adjacent and in this order.",
+      "managerFilePatterns": [
+        "/^Containerfile$/"
+      ],
+      "matchStrings": [
+        "ARG FFMPEG_VERSION=(?<currentValue>\\S+)\\nARG FFMPEG_COMMIT=(?<currentDigest>[0-9a-f]{40})"
+      ],
+      "depNameTemplate": "FFmpeg/FFmpeg",
+      "datasourceTemplate": "github-tags",
+      "versioningTemplate": "regex:^n(?<major>\\d+)\\.(?<minor>\\d+)(\\.(?<patch>\\d+))?$",
+      "autoReplaceStringTemplate": "ARG FFMPEG_VERSION={{{newValue}}}\nARG FFMPEG_COMMIT={{{newDigest}}}"
+    },
+    {
+      "customType": "regex",
+      "description": "The codec libraries the ffmpeg stage installs, each pinned name=version on a line of its own, to a Docker Hardened Images build, whose version ends +dhiN. They come from DHI's own Debian repository, the one the stage's apt reads them from, whose amd64 and arm64 indexes carry the same versions. DHI deletes a superseded build, so a pin left behind fails the build until this moves it.",
+      "managerFilePatterns": [
+        "/^Containerfile$/"
+      ],
+      "matchStrings": [
+        " (?<depName>[a-z0-9][a-z0-9.+-]*)=(?<currentValue>[^\\s=]+\\+dhi\\d+) \\\\"
+      ],
+      "datasourceTemplate": "deb",
+      "registryUrlTemplate": "https://dhi.io/deb/debian/main?suite=trixie&components=main&binaryArch=amd64"
+    }
+  ],
+  "packageRules": [
+    {
+      "description": "The nightly line's pins and the stable watch share one group, and so one branch and one pull request. Until upstream publishes v4 stable, the group holds the nightly alone and merges as every update here does. From then on every nightly lands in the watch's pull request, which its check holds red, so the image stays on the nightly it has until it moves to stable by hand: CLAUDE.md, 'Moving to stable'. The watch's first update is a major one, from its floor, and Renovate would give a major a branch of its own: separateMajorMinor keeps it in the group's.",
+      "matchDepNames": [
+        "Lidarr/Lidarr",
+        "Lidarr v4 stable"
+      ],
+      "groupName": "Lidarr",
+      "labels": [
+        "lidarr"
+      ],
+      "commitMessagePrefix": "lidarr:",
+      "separateMajorMinor": false
+    },
+    {
+      "description": "Lidarr's nightlies merge once every check passes, like every other update here: the acceptance suite, not the kind of build, is what holds one back.",
+      "matchDepNames": [
+        "Lidarr/Lidarr"
+      ],
+      "automerge": true
+    },
+    {
+      "description": "The stable watch is offered only releases GitHub calls stable, of v4 or later, so neither a v3 pre-release nor a last v3 stable moves it, and it never merges itself: moving to stable is done by hand.",
+      "matchDepNames": [
+        "Lidarr v4 stable"
+      ],
+      "ignoreUnstable": true,
+      "allowedVersions": "/^v([4-9]|[1-9][0-9]+)\\./",
+      "automerge": false,
+      "prBodyNotes": [
+        "Lidarr has published a stable v4 release, so this pull request stays red, and the nightly line stops here: move the image to stable as CLAUDE.md's 'Moving to stable' says."
+      ]
+    },
+    {
+      "description": "FFmpeg, outside the Lidarr group, so stopping the nightly line at v4 stable never holds it back. Its releases merge once every check passes, majors among them: the ffmpeg stage's check and the acceptance suite's transcodes are what hold one back.",
+      "matchDepNames": [
+        "FFmpeg/FFmpeg"
+      ],
+      "labels": [
+        "ffmpeg"
+      ],
+      "commitMessagePrefix": "ffmpeg:",
+      "automerge": true
+    },
+    {
+      "description": "The codec libraries move together, in one pull request, and merge once every check passes.",
+      "matchDatasources": [
+        "deb"
+      ],
+      "matchManagers": [
+        "custom.regex"
+      ],
+      "groupName": "ffmpeg libraries",
+      "labels": [
+        "ffmpeg"
+      ],
+      "commitMessagePrefix": "ffmpeg:",
+      "automerge": true
+    }
+  ]
 }
