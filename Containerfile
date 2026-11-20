@@ -253,47 +253,63 @@ RUN retry() { \
     fi; \
     rm -rf /src/.git
 WORKDIR /src
-# Static, everything off, then only what the plugins use: the two
-# programs; the file and pipe protocols; every demuxer, parser and
-# bitstream filter, so ffprobe reads whatever a download is; every audio
-# decoder FFmpeg has natively, and the image decoders cover art comes in,
-# and no video decoder but the VP8 one WebP's selects, since decoders are
-# where FFmpeg's CVEs live, and the scan cannot see what is linked in; the
-# encoders and muxers of the formats the plugins write; and the two
-# filters they ask for. The decoder list is n9.0.2's configure
-# --list-decoders cut to those that decode audio, without the ones that
-# need a platform (AudioToolbox, MediaCodec) or an external library, and
-# those FFmpeg builds only with --enable-gpl, which this build has not. No
-# network, no devices, nothing found by autodetection, so nothing links
-# but what is named; no --enable-gpl, so the build is LGPL-2.1-or-later.
-# nasm is not in DHI's repository, so amd64 builds without FFmpeg's
-# hand-written x86 assembly; arm64's needs none.
+# Static, everything off, then only the formats Lidarr's plugins are likely
+# to meet: what downloads from YouTube, Deezer, Tidal, Qobuz and Soulseek
+# come as, and the cover art beside them. Decoders and demuxers are where
+# FFmpeg's vulnerabilities are found, and the scan cannot see what a static
+# build links in, so each format left out is one a crafted download cannot
+# reach. Decoders: MPEG audio layers 1 to 3, AAC and LATM, Opus, Vorbis,
+# WMA 1, 2 and Pro, AC-3, E-AC-3 and DTS; FLAC, ALAC, WavPack, Monkey's
+# Audio, TrueHD, MLP and WMA Lossless; every PCM FFmpeg decodes natively,
+# never AudioToolbox's, which only macOS has; and the cover art formats,
+# JPEG, PNG, BMP, GIF, WebP and TIFF, WebP's decoder bringing in VP8's,
+# since a lossy WebP image is a VP8 frame. Demuxers: the containers those
+# come in, MP3, raw AAC and LATM, FLAC, Ogg, MP4, Matroska and WebM, WAV,
+# W64, AIFF, CAF, ASF, Monkey's Audio, WavPack, raw AC-3, E-AC-3, DTS,
+# TrueHD and MLP, and the image demuxers for the art. Parsers: those of the
+# audio and art codecs above that have one. Left out: ADPCM, DSD, Musepack,
+# RealAudio, ATRAC, Speex, WMA Voice, telephony and game audio, and all
+# video but WebP's VP8, none of which a plugin downloads music as, so a
+# file in any of them is refused rather than decoded. Encoders: LAME's MP3,
+# libopus and libvorbis, and FFmpeg's own AAC, FLAC and ALAC, which the
+# plugins transcode to, and MJPEG, to re-encode cover art. Muxers: only the
+# files those encoders write, MP3, ADTS, M4A (ipod), MP4, Ogg, Opus, FLAC,
+# and image2 for the art; MP4's and M4A's are FFmpeg's MOV muxer under
+# other names, and bring it in. None for WAV, AIFF, AC-3, E-AC-3, ASF,
+# Matroska or WebM: nothing here encodes PCM, AC-3 or WMA, and the plugins
+# write none of them. One bitstream filter, aac_adtstoasc, which MP4 and
+# M4A need for AAC copied from an ADTS stream; the MOV muxer selects it
+# too, with VP9's superframe filter, which no audio needs. The two filters
+# the plugins ask for. Every list names each component, since a glob such
+# as pcm_* would take AudioToolbox's too. No network, no devices, nothing
+# found by autodetection, so nothing links but what is named; no
+# --enable-gpl, so the build is LGPL-2.1-or-later. nasm is not in DHI's
+# repository, so amd64 builds without FFmpeg's hand-written x86 assembly;
+# arm64's needs none.
 RUN case "${TARGETARCH}" in \
         amd64) asm=--disable-x86asm ;; \
         arm64) asm= ;; \
         *) echo "no FFmpeg build for ${TARGETARCH}" >&2; exit 1 ;; \
     esac; \
-    audio=aac,aac_fixed,aac_latm,ac3,ac3_fixed,acelp_kelvin,adpcm_4xm,adpcm_adx,adpcm_afc,adpcm_agm,adpcm_aica,adpcm_argo,adpcm_ct,adpcm_dtk,adpcm_ea,adpcm_ea_maxis_xa,adpcm_ea_r1,adpcm_ea_r2,adpcm_ea_r3,adpcm_ea_xas; \
-    audio+=,adpcm_g722,adpcm_g726,adpcm_g726le,adpcm_ima_acorn,adpcm_ima_alp,adpcm_ima_amv,adpcm_ima_apc,adpcm_ima_apm,adpcm_ima_cunning,adpcm_ima_dat4,adpcm_ima_dk3,adpcm_ima_dk4,adpcm_ima_ea_eacs,adpcm_ima_ea_sead; \
-    audio+=,adpcm_ima_iss,adpcm_ima_moflex,adpcm_ima_mtf,adpcm_ima_oki,adpcm_ima_qt,adpcm_ima_rad,adpcm_ima_smjpeg,adpcm_ima_ssi,adpcm_ima_wav,adpcm_ima_ws,adpcm_ima_xbox; \
-    audio+=,adpcm_ms,adpcm_mtaf,adpcm_psx,adpcm_sanyo,adpcm_sbpro_2,adpcm_sbpro_3,adpcm_sbpro_4,adpcm_swf,adpcm_thp,adpcm_thp_le,adpcm_vima,adpcm_xa,adpcm_xmd,adpcm_yamaha,adpcm_zork; \
-    audio+=,alac,als,amrnb,amrwb,anull,apac,ape,aptx,aptx_hd,atrac1,atrac3,atrac3al,atrac3p,atrac3pal,atrac9,binkaudio_dct,binkaudio_rdft,bmv_audio,bonk,cbd2_dpcm,comfortnoise,cook,dca,derf_dpcm,dfpwm,dolby_e; \
-    audio+=,dsd_lsbf,dsd_lsbf_planar,dsd_msbf,dsd_msbf_planar,dsicinaudio,dss_sp,dst,dvaudio,eac3,eightsvx_exp,eightsvx_fib,evrc,fastaudio,ffwavesynth,flac,ftr,g723_1,g728,g729,gremlin_dpcm,gsm,gsm_ms,hca,hcom,iac,ilbc,imc; \
-    audio+=,interplay_acm,interplay_dpcm,mace3,mace6,metasound,misc4,mlp,mp1,mp1float,mp2,mp2float,mp3,mp3adu,mp3adufloat,mp3float,mp3on4,mp3on4float,mpc7,mpc8,msnsiren,nellymoser,on2avc,opus,osq,paf_audio; \
-    audio+=,pcm_alaw,pcm_bluray,pcm_dvd,pcm_f16le,pcm_f24le,pcm_f32be,pcm_f32le,pcm_f64be,pcm_f64le,pcm_lxf,pcm_mulaw,pcm_s16be,pcm_s16be_planar,pcm_s16le,pcm_s16le_planar,pcm_s24be,pcm_s24daud,pcm_s24le,pcm_s24le_planar; \
-    audio+=,pcm_s32be,pcm_s32le,pcm_s32le_planar,pcm_s64be,pcm_s64le,pcm_s8,pcm_s8_planar,pcm_sga,pcm_u16be,pcm_u16le,pcm_u24be,pcm_u24le,pcm_u32be,pcm_u32le,pcm_u8,pcm_vidc,qcelp,qdm2,qdmc,qoa,ra_144,ra_288,ralf,rka; \
-    audio+=,roq_dpcm,s302m,sbc,sdx2_dpcm,shorten,sipr,siren,smackaud,sol_dpcm,speex,tak,truehd,truespeech,tta,twinvq,vmdaudio,vorbis,wady_dpcm,wavarc,wavpack,wmalossless,wmapro,wmav1,wmav2,wmavoice,ws_snd1,xan_dpcm,xma1,xma2; \
-    pcm=pcm_alaw,pcm_bluray,pcm_dvd,pcm_f32be,pcm_f32le,pcm_f64be,pcm_f64le,pcm_mulaw,pcm_s16be,pcm_s16be_planar,pcm_s16le,pcm_s16le_planar,pcm_s24be,pcm_s24daud,pcm_s24le,pcm_s24le_planar,pcm_s32be,pcm_s32le; \
-    pcm+=,pcm_s32le_planar,pcm_s64be,pcm_s64le,pcm_s8,pcm_s8_planar,pcm_u16be,pcm_u16le,pcm_u24be,pcm_u24le,pcm_u32be,pcm_u32le,pcm_u8,pcm_vidc; \
+    lossy=mp1,mp1float,mp2,mp2float,mp3,mp3float,aac,aac_fixed,aac_latm,opus,vorbis,wmav1,wmav2,wmapro,ac3,ac3_fixed,eac3,dca; \
+    lossless=flac,alac,wavpack,ape,truehd,mlp,wmalossless; \
+    pcm=pcm_alaw,pcm_bluray,pcm_dvd,pcm_f16le,pcm_f24le,pcm_f32be,pcm_f32le,pcm_f64be,pcm_f64le,pcm_lxf,pcm_mulaw,pcm_s16be,pcm_s16be_planar,pcm_s16le,pcm_s16le_planar,pcm_s24be,pcm_s24daud,pcm_s24le; \
+    pcm+=,pcm_s24le_planar,pcm_s32be,pcm_s32le,pcm_s32le_planar,pcm_s64be,pcm_s64le,pcm_s8,pcm_s8_planar,pcm_sga,pcm_u16be,pcm_u16le,pcm_u24be,pcm_u24le,pcm_u32be,pcm_u32le,pcm_u8,pcm_vidc; \
+    art=mjpeg,png,bmp,gif,webp,tiff; \
+    demuxers=mp3,aac,loas,flac,ogg,mov,matroska,wav,w64,aiff,caf,asf,ape,wv,ac3,eac3,dts,truehd,mlp; \
+    demuxers+=,image2,image2pipe,image_jpeg_pipe,image_png_pipe,image_bmp_pipe,image_gif_pipe,image_webp_pipe,image_tiff_pipe; \
     ./configure \
         --disable-everything --disable-autodetect --disable-network --disable-avdevice \
         --disable-programs --enable-ffmpeg --enable-ffprobe --disable-doc --disable-debug \
         --enable-static --disable-shared --pkg-config-flags=--static \
         --enable-zlib --enable-libmp3lame --enable-libopus --enable-libvorbis \
-        --enable-protocol=file,pipe --enable-demuxers --enable-parsers --enable-bsfs \
-        "--enable-decoder=${audio},mjpeg,png,bmp,gif,webp,tiff" \
-        "--enable-encoder=aac,alac,flac,wmav2,mjpeg,libmp3lame,libopus,libvorbis,${pcm}" \
-        --enable-muxer=ipod,mp4,mov,mp3,ogg,opus,flac,wav,aiff,adts,ac3,eac3,asf,matroska,webm,image2 \
+        --enable-protocol=file,pipe \
+        "--enable-decoder=${lossy},${lossless},${pcm},${art}" \
+        --enable-encoder=libmp3lame,aac,libopus,libvorbis,flac,alac,mjpeg \
+        "--enable-demuxer=${demuxers}" \
+        --enable-parser=aac,aac_latm,ac3,dca,flac,mlp,mpegaudio,opus,vorbis,mjpeg,png,bmp,gif,webp \
+        --enable-bsf=aac_adtstoasc \
+        --enable-muxer=mp3,adts,ipod,mp4,ogg,opus,flac,image2 \
         --enable-filter=aresample,scale \
         ${asm:+"${asm}"}
 # make writes ffmpeg and ffprobe stripped, beside the _g builds it keeps
