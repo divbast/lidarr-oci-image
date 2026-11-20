@@ -25,8 +25,8 @@ ARG LIDARR_COMMIT=6e8ac277abb214e39dd330db7c1685676d9a987f
 # in one PR, from FFmpeg's release tags, and its regex needs them adjacent
 # and in this order. The ffmpeg stage fetches the commit and asserts the
 # tag still names it.
-ARG FFMPEG_VERSION=n9.0.2
-ARG FFMPEG_COMMIT=946fcce07b6dcd0331c8cc609192aeff5e1924f8
+ARG FFMPEG_VERSION=n9.1
+ARG FFMPEG_COMMIT=74e4393595cf2b5857f0da925c4e0dd74ea306e5
 # The runtime: Docker Hardened Images' ASP.NET Core on Debian 13, with ICU,
 # OpenSSL and the .NET runtime the app runs on, no shell and no package
 # manager, and its nonroot user 65532. The app is built framework-dependent,
