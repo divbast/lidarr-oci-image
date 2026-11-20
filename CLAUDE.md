@@ -114,8 +114,8 @@ breaking change.
   children, `fpcalc` and a plugin's `ffmpeg` among them, so it needs no
   init. A restart from the UI, which a plugin install asks for, happens
   inside the process, which `TestRestartsInProcess` holds. Lidarr stopped
-  in 0.21 to 0.26 s alone, and 0.36 to 0.52 s within the suite;
-  `TestStopsPromptly` fails on a stop that takes longer than 4.3 s,
+  in 0.21 to 0.26 s alone, and within the suite in 0.25 to 0.72 s under
+  Docker and 0.35 to 1.18 s under Podman; `TestStopsPromptly` fails on a stop that takes longer than 4.3 s,
   Prowlarr's and Sonarr's budget, or any exit but 0. Do not add a
   supervisor or a second long-running process
 - **`-exitimmediately` stays.** A startup failure upstream calls
@@ -225,8 +225,9 @@ breaking change.
   one, as `no-file-capability-xattr` fails on one anywhere in the image.
   `TestFpcalcRuns` runs `fpcalc`, and `TestFFmpegTranscodes` runs `ffmpeg`
   and `ffprobe` from `PATH`, as Lidarr's user under the contract
-- **The application is root-owned and never written.** `/app` and
-  `/usr/local/bin` are `COPY`'d from the build stages. Lidarr writes to
+- **The application is root-owned and never written.** `/app`,
+  `/usr/local/bin` and `/usr/local/share/doc/ffmpeg` are `COPY`'d from
+  the build stages. Lidarr writes to
   `/config`, `TMPDIR` (`/tmp`) and the user's music and downloads alone
 
 ### The rules the build keeps
@@ -318,17 +319,35 @@ breaking change.
   ALAC, WavPack, Monkey's Audio, TrueHD, WMA Lossless and PCM), cover art,
   and the encoders, containers and filters to write MP3, AAC, Opus, Vorbis,
   FLAC, ALAC and JPEG art; no network, no devices, nothing autodetected, no
-  `--enable-gpl`. Every list is explicit, never a glob, which would take
-  the platform builds configure then warns about. LAME, Opus and Vorbis
-  link in statically, their `.so` links removed in the stage, since the
-  runtime base carries none of them; glibc, libm and zlib stay shared.
-  `test/ffmpeg-check.sh`, the stage's last step, holds that each binary
-  answers as itself, that ffmpeg has the three library encoders, and that
-  neither needs a shared library but libc, libm, libz and the loader; its
-  Go test, `test/ffmpeg`, runs it over fixtures and checks the
-  Containerfile runs it where it must. The scan cannot see a static
-  FFmpeg, so the narrow build and Renovate's FFmpeg pull requests are the
-  mitigation. Widening it is the owner's call
+  `--enable-gpl`; and `--toolchain=hardened`, FFmpeg's own FORTIFY_SOURCE,
+  stack protection and position-independent binaries bound at load, which
+  a plain configure would otherwise leave out. Every list is explicit,
+  never a glob, which would take the platform builds configure then warns
+  about, and **any configure warning fails the stage**: configure drops a
+  component it cannot build, one a new FFmpeg renamed, removed or gated,
+  with no more than a warning, and FFmpeg's pull requests merge
+  themselves, so without the guard a promised format could vanish. LAME,
+  Opus and Vorbis link in statically, their `.so` links removed in the
+  stage, since the runtime base carries none of them; glibc, libm and zlib
+  stay shared. Their notices, FFmpeg's licence and the Debian copyright
+  files of LAME, Opus, Vorbis and Ogg (whose BSD licence asks for it),
+  ship in `/usr/local/share/doc/ffmpeg`, which `TestFFmpegNotices` holds;
+  the README has no licence section. `test/ffmpeg-check.sh`, the stage's
+  last step, holds that each binary answers as itself, is
+  position-independent and bound at load, that ffmpeg has the three
+  library encoders, and that neither needs a shared library but libc,
+  libm, libz and the loader; its Go test, `test/ffmpeg`, runs it over
+  fixtures and checks the Containerfile runs it where it must.
+  `TestFFmpegTranscodes` encodes to and decodes back from MP3, Opus,
+  Vorbis and AAC. The scan cannot see a static FFmpeg, so the narrow,
+  hardened build and Renovate's FFmpeg pull requests are the mitigation.
+  Widening it is the owner's call
+- **fpcalc carries an FFmpeg of its own,** statically linked into
+  upstream's NuGet pin of Chromaprint (libavcodec 63.1 at this pin), which
+  the image neither narrows nor hardens and the scan cannot see. Lidarr
+  runs it on every file it imports. It moves only when upstream moves the
+  package; the README says so, and that Allow Fingerprinting set to Never
+  stops Lidarr running it
 - **The probe is stdlib Go.** `cmd/divbast-lidarr` and `internal/probe`
   import nothing outside the standard library, since the build context
   leaves `.ci/` out, and divbast/ci's `probekit` would put ci code in the
@@ -420,10 +439,12 @@ step needs the user's go-ahead:
    - `renovate.json`: the nightly manager follows Lidarr's GitHub
      releases, stable ones alone, as prowlarr-oci-image's manager does
      (`github-releases`, the `v` added and taken off, the four-number
-     versioning); delete `customDatasources.lidarr-nightly`, the watch's
-     manager and its rule, the group's rule and its `separateMajorMinor`,
-     and say so in the descriptions; FFmpeg's and the libraries' managers
-     stay;
+     versioning); delete `customDatasources.lidarr-nightly`, and the
+     watch's manager and its rule; drop `Lidarr v4 stable` from the group
+     rule's `matchDepNames`, and its `separateMajorMinor` and the
+     description that explains them, keeping its `lidarr` label and
+     `lidarr:` prefix; say so in the descriptions; FFmpeg's and the
+     libraries' managers stay;
    - the Containerfile: `LIDARR_VERSION` and `LIDARR_COMMIT` to the release
      picked and the commit its tag names; the fetch stage asserts the
      release's tag still names the commit, as prowlarr-oci-image's does;
@@ -574,7 +595,7 @@ step needs the user's go-ahead:
   reading of DHI's `+dhiN` packages as plain Debian ones does not
   over-report; once DHI's base says `ID=dhi`, divbast/ci scans it with
   Grype, which reads DHI's own advisories. Neither sees the static
-  FFmpeg, nor fpcalc
+  FFmpeg, nor fpcalc and the FFmpeg inside it
 - REUSE-compliant SPDX headers on every file; licence is **GPL-3.0-only**.
   The image's licences label names only that. Lidarr's own licence file
   ships in `/app/bin/LICENSE.md`, where upstream's tarball puts it, and the

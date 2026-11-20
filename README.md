@@ -198,7 +198,7 @@ keys most needed:
 | Variable | What it does |
 |---|---|
 | `LIDARR__AUTH__METHOD` | `Forms`, a login page; `External`, behind a proxy that authenticates; `None`, upstream's default on a fresh install ([Authentication](#authentication)) |
-| `LIDARR__AUTH__REQUIRED` | `Enabled`, `DisabledForLocalAddresses` or `DisabledForLocalhost` |
+| `LIDARR__AUTH__REQUIRED` | `Enabled`, or `DisabledForLocalAddresses` |
 | `LIDARR__AUTH__APIKEY` | The API key, over the one in `config.xml` |
 | `LIDARR__SERVER__URLBASE` | The path a reverse proxy serves Lidarr under, such as `/lidarr` |
 | `LIDARR__SERVER__TRUSTEDNETWORKS` | Comma-separated networks, in CIDR form, whose `X-Forwarded-For`, `-Proto` and `-Host` headers Lidarr trusts |
@@ -326,15 +326,26 @@ built from FFmpeg's source at the release the Containerfile's
 
 MP3, Opus and Vorbis come from Debian's LAME, Opus and Vorbis libraries,
 DHI's builds of them, linked into the binaries. The build is LGPL. Each
-binary is 11 to 12 MB, and transcoding is quick: on an arm64 Mac, a
-60-second test tone became MP3 in a quarter of a second, Opus or Vorbis in
-under half a second, and AAC in about a second.
+binary is about 11 MB, and transcoding is quick: on an arm64 Mac, a
+60-second test tone became MP3 in about a quarter of a second, Opus or
+Vorbis in about half a second, and AAC in about a second.
 
 **The scan cannot see them.** A static build carries no package record, so
 a vulnerability in FFmpeg or its codec libraries blocks nothing here until
-Renovate moves the pin. The narrow build is the mitigation: decoders and
-demuxers are where FFmpeg's vulnerabilities are found, and this one has
-only the few above.
+Renovate moves the pin. The narrow, hardened build is the mitigation:
+decoders and demuxers are where FFmpeg's vulnerabilities are found, this
+one has only the few above, and it is built with FFmpeg's own exploit
+mitigations (`--toolchain=hardened`: FORTIFY_SOURCE, stack protection,
+position-independent binaries bound at load).
+
+**fpcalc carries an FFmpeg of its own.** `/app/bin/fpcalc`, the
+fingerprinting tool Lidarr itself runs on every file it imports, comes
+from upstream's pin of Chromaprint on NuGet, statically linked with a
+whole FFmpeg (libavcodec 63.1 at this pin). This image neither narrows
+nor hardens that one, the scan cannot see it either, and it moves only
+when upstream moves the package. To stop Lidarr running it, set Allow
+Fingerprinting to Never under Settings, Media Management (shown with
+the advanced settings), at the cost of AcoustID matching.
 
 ## Egress at rest
 
@@ -353,10 +364,10 @@ upstream ships it:
   configure.
 
 None of it is needed to serve or to be healthy. One thing does change
-with no route out, once the image is more than 14 days older than the
-nightly it was built from, as a published image soon is: Lidarr then
-checks for an update with every round of its health checks, the check
-fails, and the round shows nothing, so the UI's System, Status page is
+with no route out, once 14 days have passed since the image was built,
+as they soon do for a published image: Lidarr then checks for an update
+with every round of its health checks, the check fails, and the round
+shows nothing, so the UI's System, Status page is
 empty rather than listing the warnings it would. The probe stays healthy;
 give Lidarr a route to `lidarr.servarr.com` to see the page.
 
