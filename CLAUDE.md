@@ -146,6 +146,17 @@ breaking change.
   and fitted 1 MiB, as did its restore; the suite's 64 MiB is far above
   that, and `TestBackupFitsTmpfs` and `TestRestoresBackup` hold it; the
   README tells users how to size theirs
+- **A restore needs a restart of the container.** The restore's upload
+  stages the database, and Lidarr's in-process restart puts it in place
+  (`Restoring Database`), but upstream clears SQLite's connection pool
+  only on a full shutdown (`Bootstrap.Start`, and after a backup), never
+  between in-process restarts, so the new host can reuse a connection to
+  the replaced, unlinked `lidarr.db` and read the old data. It never
+  showed on a Mac and showed on GitHub's arm64 runners, under both
+  engines. `TestRestoresBackup` therefore restarts the container after the
+  UI's restart before it looks for the restored tag, and the README tells
+  users to do the same, before changing anything. Upstream's own fix would
+  be a `ClearAllPools` in its restart loop; this image does not patch it
 - **No egress is needed, and some happens.** The contract suite proves the
   image serves and is healthy on a genuinely `--internal` network. The
   acceptance suite points Lidarr's own hosts at loopback and turns

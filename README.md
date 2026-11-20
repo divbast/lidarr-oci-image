@@ -152,8 +152,16 @@ install's System, Backup, until you are sure.
 Copy the old `/config` into the new volume or directory, then give it all
 to 65532 as above, with `chown -R`: the files another image wrote are
 usually its PUID's, such as 1000. Or start fresh and restore the backup
-under System, Backup; the restore applies when Lidarr restarts, which it
-does in the same container.
+under System, Backup; Lidarr restarts itself, in the same container, to
+apply it.
+
+**After restoring a backup, restart the container** (`podman restart
+lidarr`) before you change anything. Lidarr's own restart puts the
+restored database in place, but upstream leaves SQLite's connections open
+across that restart, so Lidarr can go on reading, and writing, the
+database the restore replaced: the restore looks undone, and whatever you
+change before a full restart is lost. A restart of the container opens
+the restored database whatever was left open.
 
 - This image serves on 8080, not Lidarr's usual 8686, and its
   `LIDARR__SERVER__PORT` wins over the old `config.xml`. Whatever reaches
