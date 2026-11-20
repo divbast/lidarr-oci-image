@@ -6,8 +6,8 @@
   ],
   "customDatasources": {
     "lidarr-nightly": {
-      "description": "Lidarr's nightly builds: every build of develop that upstream's CI completes, from Azure DevOps' public build API, the one source that pairs a nightly's version with its commit. Lidarr 4 publishes nothing on GitHub until it is stable. Only CI builds of refs/heads/develop that succeeded are asked for, never a pull request's build, whose numbers come from the same counter. The transform gives releases alone: each a version, the commit it was built from as its digest, and when it finished. JSONata collapses a one-element list to its element, so the list is built in brackets, and stays a list whatever Azure answers.",
-      "defaultRegistryUrlTemplate": "https://dev.azure.com/Lidarr/Lidarr/_apis/build/builds?definitions=1&branchName=refs/heads/develop&resultFilter=succeeded&reasonFilter=individualCI,batchedCI&$top=50&api-version=7.1",
+      "description": "Lidarr's nightly builds: every build of develop that upstream's CI completes, from Azure DevOps' public build API, the one source that pairs a nightly's version with its commit. Lidarr 4 publishes nothing on GitHub until it is stable. Only CI builds of refs/heads/develop that succeeded are asked for, never a pull request's build, whose numbers come from the same counter, the newest finished first, so the 50 asked for always hold the newest whatever Azure's default order. The transform gives releases alone: each a version, the commit it was built from as its digest, and when it finished. JSONata collapses a one-element list to its element, so the list is built in brackets, and stays a list whatever Azure answers.",
+      "defaultRegistryUrlTemplate": "https://dev.azure.com/Lidarr/Lidarr/_apis/build/builds?definitions=1&branchName=refs/heads/develop&resultFilter=succeeded&reasonFilter=individualCI,batchedCI&queryOrder=finishTimeDescending&$top=50&api-version=7.1",
       "transformTemplates": [
         "{\"releases\": [value.{\"version\": buildNumber, \"digest\": sourceVersion, \"releaseTimestamp\": finishTime}]}"
       ]
