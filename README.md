@@ -470,8 +470,9 @@ the same purpose, at one pinned release of it:
 - `renovate.yml` runs Renovate, as below.
 - `stall.yml` fails, and GitHub emails you, when a Renovate pull request
   has been open more than 14 days or red or pending for more than a day,
-  when Renovate has not succeeded in a day, or when it could not look a
-  dependency up, Azure's build list among them.
+  when Renovate has not succeeded in a day, when it could not look a
+  dependency up, Azure's build list among them, or when a daily slot that
+  should have published did not.
 
 The acceptance suite, on top of the contract, checks that Lidarr serves
 `/ping` and its login page, refuses the API without a key, starts with no
