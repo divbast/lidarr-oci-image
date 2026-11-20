@@ -27,7 +27,7 @@ ARG LIDARR_COMMIT=6e8ac277abb214e39dd330db7c1685676d9a987f
 # tag still names it.
 ARG FFMPEG_VERSION=n9.0.2
 ARG FFMPEG_COMMIT=946fcce07b6dcd0331c8cc609192aeff5e1924f8
-# The runtime:Docker Hardened Images' ASP.NET Core on Debian 13, with ICU,
+# The runtime: Docker Hardened Images' ASP.NET Core on Debian 13, with ICU,
 # OpenSSL and the .NET runtime the app runs on, no shell and no package
 # manager, and its nonroot user 65532. The app is built framework-dependent,
 # so a rebuild of this image patches the runtime. CI verifies its signature
@@ -285,7 +285,17 @@ WORKDIR /src
 # found by autodetection, so nothing links but what is named; no
 # --enable-gpl, so the build is LGPL-2.1-or-later. nasm is not in DHI's
 # repository, so amd64 builds without FFmpeg's hand-written x86 assembly;
-# arm64's needs none.
+# arm64's needs none. --toolchain=hardened is FFmpeg's own set of exploit
+# mitigations, which Debian's build flags would otherwise give and a plain
+# configure never reads: FORTIFY_SOURCE, a stack protector on every
+# function, and position-independent binaries bound at load, full RELRO;
+# the check below holds the last two. A component configure cannot build,
+# one a new FFmpeg renamed, dropped or gated, it leaves out with no more
+# than a warning, and the format would vanish without a word: any warning
+# fails the build here, naming it. Each component goes to configure as an
+# option of its own, since configure warns of a name it does not know only
+# when nothing else in its list matches: one name in a list of many would
+# be dropped with no warning at all.
 RUN case "${TARGETARCH}" in \
         amd64) asm=--disable-x86asm ;; \
         arm64) asm= ;; \
@@ -298,30 +308,51 @@ RUN case "${TARGETARCH}" in \
     art=mjpeg,png,bmp,gif,webp,tiff; \
     demuxers=mp3,aac,loas,flac,ogg,mov,matroska,wav,w64,aiff,caf,asf,ape,wv,ac3,eac3,dts,truehd,mlp; \
     demuxers+=,image2,image2pipe,image_jpeg_pipe,image_png_pipe,image_bmp_pipe,image_gif_pipe,image_webp_pipe,image_tiff_pipe; \
+    opts=(); \
+    enable() { \
+        local names name; \
+        IFS=, read -ra names <<<"$2"; \
+        for name in "${names[@]}"; do opts+=("--enable-$1=${name}"); done; \
+    }; \
+    enable protocol file,pipe; \
+    enable decoder "${lossy},${lossless},${pcm},${art}"; \
+    enable encoder libmp3lame,aac,libopus,libvorbis,flac,alac,mjpeg; \
+    enable demuxer "${demuxers}"; \
+    enable parser aac,aac_latm,ac3,dca,flac,mlp,mpegaudio,opus,vorbis,mjpeg,png,bmp,gif,webp; \
+    enable bsf aac_adtstoasc; \
+    enable muxer mp3,adts,ipod,mp4,ogg,opus,flac,image2; \
+    enable filter aresample,scale; \
     ./configure \
         --disable-everything --disable-autodetect --disable-network --disable-avdevice \
         --disable-programs --enable-ffmpeg --enable-ffprobe --disable-doc --disable-debug \
         --enable-static --disable-shared --pkg-config-flags=--static \
         --enable-zlib --enable-libmp3lame --enable-libopus --enable-libvorbis \
-        --enable-protocol=file,pipe \
-        "--enable-decoder=${lossy},${lossless},${pcm},${art}" \
-        --enable-encoder=libmp3lame,aac,libopus,libvorbis,flac,alac,mjpeg \
-        "--enable-demuxer=${demuxers}" \
-        --enable-parser=aac,aac_latm,ac3,dca,flac,mlp,mpegaudio,opus,vorbis,mjpeg,png,bmp,gif,webp \
-        --enable-bsf=aac_adtstoasc \
-        --enable-muxer=mp3,adts,ipod,mp4,ogg,opus,flac,image2 \
-        --enable-filter=aresample,scale \
-        ${asm:+"${asm}"}
+        "${opts[@]}" \
+        --toolchain=hardened \
+        ${asm:+"${asm}"} \
+        | tee /tmp/configure.log; \
+    if grep -n '^WARNING' /tmp/configure.log >&2; then \
+        echo "ERROR: configure warned, above: a component it names is not built. Fix the Containerfile's lists for this FFmpeg." >&2; \
+        exit 1; \
+    fi
 # make writes ffmpeg and ffprobe stripped, beside the _g builds it keeps
-# symbols in.
+# symbols in. The notices of what they carry go beside them in the image:
+# FFmpeg's licence, and the copyright files of the codec libraries linked
+# in, LAME's under the LGPL, and Opus's, Vorbis's and Ogg's under the BSD
+# licence, which asks that they ship with the binary.
 RUN make -j"$(nproc)" \
-    && install -d /out \
-    && install -m 0755 -t /out ffmpeg ffprobe
+    && install -d /out /notices \
+    && install -m 0755 -t /out ffmpeg ffprobe \
+    && install -m 0644 -t /notices LICENSE.md COPYING.LGPLv2.1 \
+    && for pkg in libmp3lame0 libogg0 libopus0 libvorbis0a libvorbisenc2; do \
+        install -m 0644 "/usr/share/doc/${pkg}/copyright" "/notices/${pkg}.copyright"; \
+    done
 COPY test/ffmpeg-check.sh /tmp/ffmpeg-check.sh
 # The check reads /out, which the runtime stage copies both binaries
 # from, once nothing more is written there, so what it passes is what
-# ships: each answers as itself, ffmpeg has the three library encoders,
-# and neither needs a shared library the runtime base lacks.
+# ships: each answers as itself, is position-independent and bound at
+# load, ffmpeg has the three library encoders, and neither needs a shared
+# library the runtime base lacks.
 RUN /tmp/ffmpeg-check.sh /out
 
 FROM ${RUNTIME_IMAGE}
@@ -337,6 +368,7 @@ COPY --from=fetch /src/LICENSE.md /app/bin/LICENSE.md
 COPY --from=probe /out/divbast-lidarr /usr/local/bin/divbast-lidarr
 # On the base's PATH, for the plugins that look for them there
 COPY --from=ffmpeg /out/ffmpeg /out/ffprobe /usr/local/bin/
+COPY --from=ffmpeg /notices /usr/local/share/doc/ffmpeg
 # The data directory, empty and uid 65532's, and not a VOLUME: a new named
 # volume mounted here takes its owner from it, so Lidarr can write to it.
 COPY --from=backend --chown=65532:65532 /out/config /config

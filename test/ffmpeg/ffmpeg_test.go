@@ -10,8 +10,8 @@
 // set must pass, on either architecture's loader, and each way the check
 // can refuse is seen refusing: an encoder missing, or named only in
 // another's description, a shared library the runtime base does not
-// carry, a binary missing, not executable, not answering, or not an ELF
-// file. The Containerfile must run it where it must, and the check of that
+// carry, a binary bound lazily or not position-independent, a binary
+// missing, not executable, not answering, or not an ELF file. The Containerfile must run it where it must, and the check of that
 // is seen refusing a Containerfile changed each way it could be wired
 // wrong.
 package ffmpeg
@@ -56,16 +56,33 @@ const encoders = ` V..... = Video
 `
 
 // dynamic is readelf -d's report of a binary needing the given libraries,
-// with the other entries a real one has around them.
+// linked as the stage links them, position-independent and bound at load
+// (full RELRO), with the other entries a real one has around them.
 func dynamic(needed ...string) string {
+	return dynamicFlags(hardened, needed...)
+}
+
+// The flag entries readelf -d reports for a binary linked with -z now and
+// -pie, as --toolchain=hardened links them, and for one linked with
+// neither -z now nor anything else: the toolchain's defaults, PIE alone.
+const (
+	hardened = " 0x000000000000001e (FLAGS)              BIND_NOW\n" +
+		" 0x000000006ffffffb (FLAGS_1)            Flags: NOW PIE\n"
+	lazy = " 0x000000006ffffffb (FLAGS_1)            Flags: PIE\n"
+)
+
+// dynamicFlags is dynamic with flags, a binary's FLAGS and FLAGS_1 entries,
+// in place of the hardened ones.
+func dynamicFlags(flags string, needed ...string) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "\nDynamic section at offset 0x1fd28 contains %d entries:\n", len(needed)+3)
+	fmt.Fprintf(&b, "\nDynamic section at offset 0x1fd28 contains %d entries:\n", len(needed)+3+strings.Count(flags, "\n"))
 	b.WriteString("  Tag        Type                         Name/Value\n")
 	for _, lib := range needed {
 		fmt.Fprintf(&b, " 0x0000000000000001 (NEEDED)             Shared library: [%s]\n", lib)
 	}
 	b.WriteString(" 0x000000000000000c (INIT)               0x4b0e0\n")
 	b.WriteString(" 0x000000000000001d (RUNPATH)            Library runpath: [/usr/lib]\n")
+	b.WriteString(flags)
 	b.WriteString(" 0x0000000000000000 (NULL)               0x0\n")
 	return b.String()
 }
@@ -202,6 +219,26 @@ func TestPasses(t *testing.T) {
 		{name: "amd64", ffmpeg: good("ffmpeg", amd64Loader), ffprobe: good("ffprobe", amd64Loader)},
 		{name: "arm64", ffmpeg: good("ffmpeg", arm64Loader), ffprobe: good("ffprobe", arm64Loader)},
 		{name: "fewer-libraries", ffmpeg: good("ffmpeg", arm64Loader), ffprobe: fewer},
+		{
+			// A linker that marks binding at load in FLAGS alone
+			name: "bind-now-in-flags-alone",
+			ffmpeg: func() binary {
+				b := good("ffmpeg", arm64Loader)
+				b.dynamic = dynamicFlags(" 0x000000000000001e (FLAGS)              BIND_NOW\n"+lazy, "libc.so.6", arm64Loader)
+				return b
+			}(),
+			ffprobe: good("ffprobe", arm64Loader),
+		},
+		{
+			// A linker that marks binding at load in FLAGS_1 alone
+			name:   "now-in-flags-1-alone",
+			ffmpeg: good("ffmpeg", amd64Loader),
+			ffprobe: func() binary {
+				b := good("ffprobe", amd64Loader)
+				b.dynamic = dynamicFlags(" 0x000000006ffffffb (FLAGS_1)            Flags: NOW PIE\n", "libc.so.6", amd64Loader)
+				return b
+			}(),
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -297,6 +334,37 @@ func TestRefuses(t *testing.T) {
 				return b
 			}(),
 			want: "/ffmpeg needs libzstd.so.1",
+		},
+		{
+			// The toolchain's defaults, without --toolchain=hardened: PIE,
+			// but bound lazily, so the GOT stays writable
+			name: "ffmpeg-binds-lazily",
+			ffmpeg: func() binary {
+				b := good("ffmpeg", amd64Loader)
+				b.dynamic = dynamicFlags(lazy, "libm.so.6", "libc.so.6", amd64Loader)
+				return b
+			}(),
+			want: "/ffmpeg binds lazily",
+		},
+		{
+			name: "ffprobe-not-pie",
+			ffprobe: func() binary {
+				b := good("ffprobe", amd64Loader)
+				b.dynamic = dynamicFlags(" 0x000000000000001e (FLAGS)              BIND_NOW\n"+
+					" 0x000000006ffffffb (FLAGS_1)            Flags: NOW\n", "libc.so.6", amd64Loader)
+				return b
+			}(),
+			want: "/ffprobe is not position-independent",
+		},
+		{
+			// No flag entry at all
+			name: "ffprobe-no-flags",
+			ffprobe: func() binary {
+				b := good("ffprobe", amd64Loader)
+				b.dynamic = dynamicFlags("", "libc.so.6", amd64Loader)
+				return b
+			}(),
+			want: "/ffprobe binds lazily",
 		},
 		{
 			name: "not-elf",

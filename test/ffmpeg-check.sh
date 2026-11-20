@@ -16,10 +16,16 @@
 # library but glibc's libc and libm, zlib's libz and the loader, the ones
 # the runtime base carries. The codec libraries must link in statically:
 # one linked dynamically would build and pass every test here, and then
-# fail to start in the image, which carries none of them.
+# fail to start in the image, which carries none of them. Each binary must
+# also be position-independent and bound at load, full RELRO, as the
+# stage's --toolchain=hardened links it: these binaries parse whatever a
+# download brings, and the scan cannot see them, so a build that lost the
+# hardening would otherwise ship without a word.
 #
 # readelf reads each binary's dynamic section, whose NEEDED entries are
-# the libraries it asks the loader for. -encoders prints a legend, a line
+# the libraries it asks the loader for, and its FLAGS and FLAGS_1 entries
+# say how it was linked: BIND_NOW, or NOW among FLAGS_1's, for binding at
+# load, and PIE among FLAGS_1's. -encoders prints a legend, a line
 # of dashes, then an encoder a line with its name the second field: only
 # names below the dashes count, and only as that field, so an encoder
 # named in another's description does not.
@@ -66,6 +72,17 @@ for name in ffmpeg ffprobe; do
 		*) fail "${bin} needs ${lib}, which the runtime base does not carry: only libc, libm, libz and the loader come from it, and the codec libraries must link in statically." ;;
 		esac
 	done <<<"${needed}"
+
+	flags=$(awk '
+		$2 == "(FLAGS)" { for (i = 3; i <= NF; i++) print $i }
+		$2 == "(FLAGS_1)" && $3 == "Flags:" { for (i = 4; i <= NF; i++) print $i }
+	' <<<"${section}")
+	if ! grep -qx -e BIND_NOW -e NOW <<<"${flags}"; then
+		fail "${bin} binds lazily, without full RELRO: the stage links it with -z now through --toolchain=hardened."
+	fi
+	if ! grep -qx PIE <<<"${flags}"; then
+		fail "${bin} is not position-independent: the stage links it with -pie through --toolchain=hardened."
+	fi
 done
 
 code=0
@@ -83,4 +100,4 @@ for encoder in libmp3lame libopus libvorbis; do
 	fi
 done
 
-echo "ffmpeg-check: OK: ffmpeg and ffprobe answer -version, ffmpeg has the libmp3lame, libopus and libvorbis encoders, and neither needs a shared library but libc, libm, libz and the loader."
+echo "ffmpeg-check: OK: ffmpeg and ffprobe answer -version, are position-independent and bound at load, ffmpeg has the libmp3lame, libopus and libvorbis encoders, and neither needs a shared library but libc, libm, libz and the loader."
