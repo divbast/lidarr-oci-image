@@ -4,10 +4,13 @@
 package acceptance
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/divbast/ci/harness"
 )
@@ -29,7 +32,11 @@ type healthCheck struct {
 // must start, which takes its execute bit and a binary that needs nothing
 // the base lacks, and say what it is. Lidarr checks it too, on starting,
 // and a Health page entry naming fpcalc means it found it missing, not
-// executable or too old: there must be none.
+// executable or too old: there must be none. Lidarr fills the page once
+// every check run on starting has returned, after its host has started,
+// so the test waits until the page holds entries, as a fresh install's
+// always does (no indexer, no download client), and an empty page never
+// passes for a clean one.
 func TestFpcalcRuns(t *testing.T) {
 	t.Parallel()
 	e, image := underTest(t)
@@ -46,13 +53,9 @@ func TestFpcalcRuns(t *testing.T) {
 		checks.True(fpcalc+" -version says it is fpcalc", strings.HasPrefix(out, "fpcalc version "), harness.Clip(out))
 	}
 
-	if err := logged(t.Context(), s.C, hostStarted, harness.ServeWithin); err != nil {
-		checks.True("Lidarr's host finishes starting, its health checks run", false, err.Error())
-		return
-	}
-	health, ok := callAPI[[]healthCheck](t, s, "GET /api/v1/health answers 200", http.StatusOK,
-		http.MethodGet, "/api/v1/health", nil)
-	if !ok {
+	health, err := healthChecked(t.Context(), s)
+	checks.True("Lidarr's Health page fills once its checks have run", err == nil, errText(err))
+	if err != nil {
 		return
 	}
 	var found []string
@@ -62,4 +65,34 @@ func TestFpcalcRuns(t *testing.T) {
 		}
 	}
 	checks.True("the Health page has no entry about fpcalc", len(found) == 0, fmt.Sprintf("%q", found))
+}
+
+// healthChecked asks for Lidarr's Health page every 250 ms until it lists
+// an entry, and returns it then, or an error with the last answer once
+// harness.ServeWithin has passed. Every answer short of that, a failed
+// request or an empty page among them, is one to ask again after.
+func healthChecked(ctx context.Context, s *harness.Serving) ([]healthCheck, error) {
+	var health []healthCheck
+	err := harness.Poll(ctx, harness.ServeWithin, 250*time.Millisecond, func(ctx context.Context) error {
+		resp, err := api(ctx, s, http.MethodGet, "/api/v1/health", nil)
+		switch {
+		case err != nil:
+			return harness.NotYet(err)
+		case resp.Status != http.StatusOK:
+			return harness.NotYet(fmt.Errorf("status %d", resp.Status))
+		}
+		var got []healthCheck
+		if err := jsonInto(resp, &got); err != nil {
+			return harness.NotYet(err)
+		}
+		if len(got) == 0 {
+			return harness.NotYet(errors.New("the Health page lists nothing yet"))
+		}
+		health = got
+		return nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("GET /api/v1/health: %w", err)
+	}
+	return health, nil
 }

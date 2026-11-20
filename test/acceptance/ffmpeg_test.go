@@ -26,6 +26,8 @@ const tone = "testdata/tone.flac"
 // /config, and ffprobe reads each back as the codec asked for. MP3, Opus
 // and Vorbis come from the codec libraries linked into ffmpeg, which the
 // runtime base does not carry, so a library left shared would fail here.
+// Each is then decoded back to FLAC, as a plugin converting a download
+// does, so the MP3, Opus, Vorbis and AAC decoders run too.
 func TestFFmpegTranscodes(t *testing.T) {
 	t.Parallel()
 	e, image := underTest(t)
@@ -75,5 +77,41 @@ func TestFFmpegTranscodes(t *testing.T) {
 			codecs = append(codecs, st.CodecType+"/"+st.CodecName)
 		}
 		harness.Equal(checks, "ffprobe reads "+tc.out+" as one audio stream of "+tc.codec, "audio/"+tc.codec, strings.Join(codecs, ","))
+
+		back := tc.out + ".flac"
+		res, err = s.C.Exec(t.Context(), nil,
+			"ffmpeg", "-hide_banner", "-loglevel", "error", "-i", tc.out, "-c:a", "flac", "-y", back)
+		switch {
+		case err != nil:
+			checks.True("ffmpeg decodes "+tc.out+" back to FLAC", false, err.Error())
+		default:
+			checks.True("ffmpeg decodes "+tc.out+" back to FLAC", res.Code == 0,
+				fmt.Sprintf("exit status %d, printing %s", res.Code, harness.Clip(string(res.Stdout)+string(res.Stderr))))
+		}
+	}
+}
+
+// notices are the licence notices of what the image's ffmpeg and ffprobe
+// carry: FFmpeg's own, and the copyright files of the codec libraries
+// linked into them, which the BSD licence of Opus, Vorbis and Ogg asks to
+// ship with the binary.
+var notices = []string{
+	"/usr/local/share/doc/ffmpeg/LICENSE.md",
+	"/usr/local/share/doc/ffmpeg/COPYING.LGPLv2.1",
+	"/usr/local/share/doc/ffmpeg/libmp3lame0.copyright",
+	"/usr/local/share/doc/ffmpeg/libogg0.copyright",
+	"/usr/local/share/doc/ffmpeg/libopus0.copyright",
+	"/usr/local/share/doc/ffmpeg/libvorbis0a.copyright",
+	"/usr/local/share/doc/ffmpeg/libvorbisenc2.copyright",
+}
+
+// TestFFmpegNotices checks the image carries the licence notices of
+// everything linked into its ffmpeg and ffprobe.
+func TestFFmpegNotices(t *testing.T) {
+	t.Parallel()
+	e, image := underTest(t)
+	s := serveFresh(t, e, image)
+	for _, n := range notices {
+		present(t, s, "the image carries "+n, n)
 	}
 }
