@@ -1,28 +1,29 @@
-<!-- SPDX-License-Identifier: BSD-2-Clause -->
+<!-- SPDX-License-Identifier: GPL-3.0-only -->
 <!-- SPDX-FileCopyrightText: 2026 Aryan Ameri <github@aryan.ameri.coffee> -->
 
-# oci-image-template
+# lidarr-oci-image
 
-A minimal working divbast app: one page served by a stdlib Go server, in a
-container image that runs at zero Linux capabilities, with no new
-privileges, on a read-only root filesystem as a non-root user. Every new
-divbast image repository is made from it, by its entry in `divbast/infra`,
-and then changed as the README's "Making a new app" says, in that order:
-a Go app keeps the Go core, a PHP app moves the PHP layer, `layers/php`,
-into place, and a .NET app the .NET layer, `layers/dotnet`.
+Lidarr, the music collection manager, built from source in a container
+image that runs at zero Linux capabilities, with no new privileges, on a
+read-only root filesystem as a non-root user. It follows Lidarr 4's
+nightly line, upstream's develop branch on .NET 10, which upstream
+publishes only as nightly builds, until upstream publishes v4 stable, and
+then moves to stable by hand ([Moving to stable](#moving-to-stable)). It
+was made from oci-image-template with the template's .NET layer, and its
+Servarr parts follow sonarr-oci-image's. The divbast organisation's
+settings, rulesets and Renovate wiring live in `divbast/infra`.
 
-It publishes nothing to ghcr.io: its publish job rehearses. The divbast
-organisation's settings, rulesets and Renovate wiring live in
-`divbast/infra`.
+It publishes to `ghcr.io/divbast/lidarr`, tagged with Lidarr's version
+and `latest`, from `build.yml`'s daily slot and its manual run on `main`.
 
-What makes the image this app's lives here: the Containerfile, the app
-(`cmd/template`, `internal/server`), and the acceptance tests, beside the
-PHP layer: its Containerfile fragment, Caddy and PHP configuration, page,
-and health probe and endpoint; and beside the .NET layer: its whole
-Containerfile, demo app, health probe and build-stage checks. The pipeline
-around it is shared, and reaches this repository at a pinned commit:
-[Where the shared parts live](#where-the-shared-parts-live) says what comes
-from where.
+What makes the image this app's lives here: the Containerfile, the health
+probe (`cmd/divbast-lidarr`, `internal/probe`), the backend stage's two
+checks (`test/global-json.sh`, `test/runtime-major.sh`), the ffmpeg
+stage's check (`test/ffmpeg-check.sh`), the watch for v4 stable
+(`test/stable`), `renovate.json`'s managers and datasource, and the
+acceptance tests. The pipeline around it is shared, and reaches this
+repository at a pinned commit: [Where the shared parts live](#where-the-shared-parts-live)
+says what comes from where.
 
 ## CRITICAL: Git Commit Message Format
 
@@ -63,210 +64,348 @@ breaking change.
 | Privileges | **no new ones** (`--security-opt no-new-privileges`), under the engine's **seccomp** filter |
 | Root filesystem | **read-only** |
 | User | uid/gid **65532**, never root |
-| Listen port | **8080** for the page — never 80 |
-| Health port | **8081** — health only, never serves the page, meant to stay unpublished |
-| Other listeners | **none** |
-| tmpfs required | exactly one: `/tmp`, at **16 MiB**, `noexec,nosuid,nodev` |
-| Writable mounts | `/tmp` alone, and nothing written can run; on Podman, `--read-only-tmpfs=false` |
-| Volume | **none** |
-| Outbound network | **none** |
+| Listeners | **8080** alone, for the UI, the API and `/ping`. No health port; never 80 |
+| tmpfs required | exactly one: `/tmp`, at **64 MiB**, `noexec,nosuid,nodev`; users with a large database need twice `lidarr.db`, plus their largest plugin |
+| Writable mounts | `/config` and `/tmp`, and the user's music and downloads, and nothing written can run; on Podman, `--read-only-tmpfs=false` |
+| Volume | `/config`, **given by the user** and writable by 65532. The image carries it empty and owned by 65532 and declares **no `VOLUME`** |
+| Outbound network | **none needed to serve or be healthy**. At rest Lidarr reaches `lidarr.servarr.com`, `api.lidarr.audio`, Servarr (analytics and Sentry), GitHub for plugins, and whatever the user configures |
 | Shell, package manager | **none** |
-| Processes | **one**, the app as PID 1: `template serve` |
-| Healthy | the shipped probe, `template health`: `/healthz` **200** and loopback `GET /` **exactly** `Hello from oci-image-template` |
+| Processes | **one** long-running, `/app/bin/Lidarr -nobrowser -exitimmediately -data=/config`, as PID 1; it runs `/app/bin/fpcalc` on audio files, and plugins run `/usr/local/bin/ffmpeg` and `ffprobe` |
+| Healthy | the shipped probe, `divbast-lidarr health`: `/ping` **200** with `"status": "OK"` **and** `GET /api/v1/system/status` with the API key, `appName` `Lidarr` and `version` the image's |
 | Engine healthcheck | Docker runs it automatically. **Podman does not** — pass `--health-cmd` yourself |
 
 - **Podman never sees this image's `HEALTHCHECK`.** Its `libimage` reads a
   healthcheck only from a Docker-media-type manifest; divbast images publish
   as an OCI index, so Podman's OCI inspection branch never reaches the
   config's healthcheck field — no version of Podman does. Give Podman users
-  `--health-cmd '["/usr/local/bin/template","health"]'`
+  `--health-cmd '["/usr/local/bin/divbast-lidarr","health"]'`
   (a Quadlet's `HealthCmd=` takes the same value) — no leading `"CMD"`,
   because Podman before 5.8.0 re-splits such an array into one token instead
   of running it. Tracked upstream as podman/podman#25454 and #18904. The
   contract suite checks the image's `HEALTHCHECK` is that array in exec
-  form, and has each engine judge the container: Docker by the image's
-  `HEALTHCHECK`, Podman by the same array passed as `--health-cmd`
-- **The shipped probe asserts two halves, and neither implies the other.**
-  `/healthz` on 8081 shows the server runs, but never goes through 8080's
-  routes. Only the page's exact answer proves the app port serves the app.
-  Anything checking this image should run the probe rather than
-  reimplement either half. It prints nothing when healthy, which the
-  contract's `health-probe` check asserts; each failure is a line,
-  `<check>: <reason>`: with no shell, the engine's health log is the only
+  form, and has each engine judge the container
+- **The probe asserts two halves, and neither implies the other.** `/ping`
+  runs a database query and shows the server answers; the status, asked
+  with the API key, which every authentication method accepts, shows the
+  build is the pinned one. It reads the key from `LIDARR__AUTH__APIKEY`,
+  else `/config/config.xml`, and the URL base from
+  `LIDARR__SERVER__URLBASE`, else config.xml's `<UrlBase>`, since a base
+  set in the UI lives only there. It never follows a redirect: Lidarr
+  redirects a request lacking its base, which is the misconfiguration the
+  probe exists to show. While Lidarr starts, `/ping` answers 503 with
+  `Lidarr is starting up`, which the probe reports. It prints nothing
+  when healthy; each failure is a line, `ping: <reason>` or `status:
+  <reason>`, since with no shell the engine's health log is the only
   record of why
-- **8080 is an allowlist.** It serves `/`, and answers 404 with an empty
-  body to everything else, `/index.php` and `/healthz` included, and so
-  does 8081 to all but `/healthz`. `TestServes` asks for `/index.php`,
-  `/healthz` and a path nothing names, and fails on any answer but an
-  empty 404; the contract's `health-port-only` check fails on `/healthz`
-  answering on 8080
-- **Nothing listens but 8080 and 8081.** The contract suite reads the
-  kernel's socket tables and fails on any other TCP port a process in the
-  container listens on, and on any UDP socket one holds
-- **One process, always, and it stops when told.** The app is the
-  ENTRYPOINT, so it is PID 1. Nothing runs before it: it has no state to
-  prepare and no environment to read. The kernel drops a signal PID 1 does
-  not handle, so the app handles SIGTERM and SIGINT itself, finishes what
-  it is answering within 5 s and exits 0; `TestStopsPromptly` fails on a
-  stop that takes longer, or any other exit. Do not add a supervisor or a
-  second long-running process
-- **Zero egress.** The app opens no connection out. The contract suite
-  proves the image serves and is healthy on a genuinely `--internal`
-  network, and cannot connect out
+- **The HEALTHCHECK's `--timeout` must clear the probe's own budget.** The
+  probe allows each half 4 s, one after the other, so 8 s at worst; the
+  `HEALTHCHECK`'s 10 s lets the probe print its own line instead of an
+  engine timeout. The `--start-period` is 300 s: Lidarr listens only once
+  its migrations finish, a nightly may add one a large library takes a
+  while over, and a container marked unhealthy mid-migration may be killed
+  by autoheal or Swarm. The first passing check ends the start period, so
+  a healthy start loses nothing. The contract's `Healthcheck` must match it
+- **Nothing listens but 8080.** The contract suite reads the kernel's socket
+  tables and fails on any other TCP port a process in the container
+  listens on, and on any UDP socket one holds. `DOTNET_EnableDiagnostics=0`
+  keeps the runtime from opening its diagnostics socket
+- **One process, always, and it stops when told.** Lidarr is the
+  ENTRYPOINT, so it is PID 1, and .NET handles SIGTERM there and reaps its
+  children, `fpcalc` and a plugin's `ffmpeg` among them, so it needs no
+  init. A restart from the UI, which a plugin install asks for, happens
+  inside the process, which `TestRestartsInProcess` holds. Lidarr stopped
+  in 0.21 to 0.26 s alone, and within the suite in 0.25 to 0.72 s under
+  Docker and 0.35 to 1.18 s under Podman; `TestStopsPromptly` fails on a stop that takes longer than 4.3 s,
+  Prowlarr's and Sonarr's budget, or any exit but 0. Do not add a
+  supervisor or a second long-running process
+- **`-exitimmediately` stays.** A startup failure upstream calls
+  non-recoverable, a corrupt `config.xml` among them, then exits 3 at once.
+  Without it Lidarr waits an hour for a key press no one can make in a
+  container, and the container sits there looking alive.
+  `TestExitsOnCorruptConfig` holds it
+- **`/config` fails visibly, though not as Sonarr's does.** Lidarr's first
+  write is its error reporter's folder, `/config/Sentry`, before its own
+  check of `/config`. A `/config` 65532 cannot write makes it exit 1 within
+  two seconds, logging `Access to the path '/config/Sentry' is denied`
+  (`TestRefusesUnwritableConfig`). With no mount at all it dies within a
+  second, logging `Read-only file system : '/config/Sentry'`, with the
+  runtime's signal as its status: 133 on arm64, 139 measured on amd64
+  under emulation, so `TestRefusesNoConfigMount` asks only for a non-zero
+  exit and that line
+- **Some startup failures exit 0, and that is upstream's.** A failure
+  inside the web host, such as a PID file it cannot write (measured), a
+  port in use or a corrupt database, logs `Lidarr failed to start: …` and
+  exits normally, so an `on-failure` restart policy never fires. The README
+  says so. Nothing here can change it without patching upstream
+- **`/tmp` is the size a backup, a restore and a plugin need.** Lidarr
+  copies the database into `/tmp` before it zips the backup, receives a
+  restore's upload there, and downloads a plugin's zip there before it
+  installs it, so `/tmp` must hold twice `lidarr.db` and the largest
+  plugin, or backups, the weekly scheduled one included, fail. A backup of
+  a 614,400-byte database peaked at 608 KiB, failed on a 512 KiB `/tmp`
+  and fitted 1 MiB, as did its restore; the suite's 64 MiB is far above
+  that, and `TestBackupFitsTmpfs` and `TestRestoresBackup` hold it; the
+  README tells users how to size theirs
+- **A restore needs a restart of the container.** The restore's upload
+  stages the database, and Lidarr's in-process restart puts it in place
+  (`Restoring Database`), but upstream clears SQLite's connection pool
+  only on a full shutdown (`Bootstrap.Start`, and after a backup), never
+  between in-process restarts, so the new host can reuse a connection to
+  the replaced, unlinked `lidarr.db` and read the old data. It never
+  showed on a Mac and showed on GitHub's arm64 runners, under both
+  engines. `TestRestoresBackup` therefore restarts the container after the
+  UI's restart before it looks for the restored tag, and the README tells
+  users to do the same, before changing anything. Upstream's own fix would
+  be a `ClearAllPools` in its restart loop; this image does not patch it
+- **No egress is needed, and some happens.** The contract suite proves the
+  image serves and is healthy on a genuinely `--internal` network. The
+  acceptance suite points Lidarr's own hosts at loopback and turns
+  analytics off in every container but the contract's own, which runs as
+  shipped
+- **Analytics stay on**, as upstream ships them (the owner's decision). The
+  image sets nothing for them; the README says how to turn them off
+- **Authentication stays as upstream ships it**: off on a fresh install,
+  method `None`, no first user and no first password. Until a method is
+  set, the UI, `/initialize.json`, which holds the API key, and backup
+  downloads answer anyone; after Forms, each sends a visitor with no
+  session to the login page. The README says to choose Forms at the first
+  visit. The suite makes the first user as the UI does, with `GET` then
+  `PUT /api/v1/config/host` (202), and `TestFormsSignIn` signs in through
+  the form. Environment values are case-sensitive:
+  `LIDARR__AUTH__METHOD=forms` is ignored without a word, and
+  authentication stays off; the README says to write `Forms`
+- **The updater is off.** `/app/package_info` says `UpdateMethod=Docker`
+  and `Branch=nightly`, and upstream reads it only from beside a directory
+  named `bin`, which is why the binaries are in `/app/bin`.
+  `Lidarr.Update` is not shipped. `TestUpdaterIsDocker` and
+  `TestMigratedConfig` hold it, the latter for a linuxserver or hotio
+  `config.xml` that says `master`, which Lidarr then logs it changes to
+  `nightly`
+- **Plugins live in `/config/plugins`,** since `/app` is read-only. A fresh
+  install has no such folder; an install makes it, through `/tmp/plugins`,
+  and an in-process restart loads it. `TestRestartsInProcess` holds that a
+  restart keeps the folder, and `TestPluginsEmpty` that the plugin list
+  answers on a fresh install. Only plugins that publish a `net10.0` asset
+  install on this .NET 10 build. Plugins are third-party code with
+  Lidarr's access; no test installs one, which would need GitHub and code
+  no one has reviewed
 - **Nothing may add a shell or a package manager to the final image.** The
-  base is distroless; that is the point, and the contract's `no-shell` and
-  `no-package-manager` checks hold it there. What it removes is us running
-  apt, not the patching itself: `static-debian13` ships CA certificates and
-  time zones, and the PHP layer's `cc-debian13` libc6, libssl3t64,
-  libstdc++6, libgcc-s1, libgomp1, libzstd1 and zlib1g, all executable code
-  that takes CVEs. That obligation moves to the base image's own rebuilds —
-  and **nothing in this repository collects them on its own.** Rebuilding
-  an unchanged Containerfile does not pick them up. **Renovate is the
-  update path**: it runs every morning, after every merge to main and
-  whenever CI finishes on one of its branches, from
+  base is DHI's `aspnetcore`; that is the point, and the contract's
+  `no-shell` and `no-package-manager` checks hold it there. That means no
+  Custom Script connection, Import Using Script, Script updater or any
+  interpreted script can work, and the README says so. What the base
+  removes is us running apt, not the patching itself: ICU, OpenSSL, glibc
+  and the .NET runtime are all executable code that takes CVEs, and
+  **nothing in this repository collects their fixes on its own.**
+  Rebuilding an unchanged Containerfile does not pick them up. **Renovate
+  is the update path**: it runs every morning, after every merge to main
+  and whenever CI finishes on one of its branches, from
   `.github/workflows/renovate.yml`, which calls divbast/ci's
   `renovate.yml`, as the org's `divbast-renovate` App, managed from
-  `divbast/infra`. After a merge it rebases every open PR left behind
-  main, since GitHub re-runs no checks when a base moves and a green check
-  on a stale base proves nothing. **It merges its own PRs** once every
-  check passes, with a squash, while the repository variable
-  `OCI_IMAGE_TEMPLATE_AUTOMERGE` is `enabled`; any other value stops
-  merging from the next run. A new major of divbast/ci, a raise of
-  `go.mod`'s `go` line, and a .NET major wait for approval on the
-  Dependency Dashboard first. **A merge never publishes.** `build.yml`'s
-  daily run is the publishing slot, through divbast/ci's
-  `app-publish.yml`, and a manual run of `build` publishes at once.
-  `.github/workflows/stall.yml`, through divbast/ci's `stall.yml`, fails
-  each day that updates have stopped flowing: a Renovate PR stuck, or
-  Renovate silent
-- **The publish job rehearses.** `build.yml` calls `app-publish.yml` with
-  `image: ghcr.io/divbast/oci-image-template` and `rehearse: true`. It
-  decides against that image on ghcr.io, which is never published, so
-  every slot and button run publishes, into a registry the job starts for
-  itself: push, a staging tag, a real attestation, its verification, the
-  version and `latest` tags, and the anonymous check. Nothing reaches
-  ghcr.io. `stall.yml` leaves out `slots`, which count the slots that
-  should have published. An app made from the template turns both around
-  in the README's step 8, and in its order: `slots` go on only once the
-  app's first image is public
+  `divbast/infra`. It moves the DHI images by digest, with the .NET SDK and
+  runtime grouped in one PR and .NET majors held for Dashboard approval
+  (renovate-config's `:app`), Lidarr's nightlies as they come, FFmpeg's
+  releases, and the DHI packages the ffmpeg stage installs. After a merge
+  it rebases every open PR left behind main, since GitHub re-runs no
+  checks when a base moves and a green check on a stale base proves
+  nothing. **It merges its own PRs** once every check passes, with a
+  squash, while the repository variable `LIDARR_AUTOMERGE` is `enabled`;
+  any other value stops merging from the next run. A new major of
+  divbast/ci, and a raise of `go.mod`'s `go` line, wait for approval on the
+  Dependency Dashboard first, and the stable watch's PR never merges
+  itself. **A merge never publishes.** `build.yml`'s daily run is the
+  publishing slot, through divbast/ci's `app-publish.yml`, and a manual run
+  of `build` publishes at once. `.github/workflows/stall.yml`, through
+  divbast/ci's `stall.yml`, fails each day that updates have stopped
+  flowing: a Renovate PR stuck, Renovate silent, or a dependency Renovate
+  could not look up, Azure's build list among them
 - **Every image the Containerfile builds from is verified first.** Before
   `app-check.yml` builds anything, `divbast-verify-images` refuses any image
-  not pinned as `<name>:<tag>@sha256:<digest>`, and verifies the distroless
-  runtime's cosign signature by the distroless project; the `golang`
-  builder is held by its digest alone. A local `just build` does not
-  verify; `just ci-tools && .ci/bin/divbast-verify-images` does, with
-  cosign from `mise.toml`
-- **The binary must never carry a file capability.** A binary with a file
+  not pinned as `<name>:<tag>@sha256:<digest>`, and verifies Docker's
+  signature on each DHI image, the runtime and **every stage's image**:
+  the fetch and frontend stages' `dhi.io/node` `-dev`, the backend's
+  `dhi.io/dotnet` SDK and the probe and ffmpeg stages' `dhi.io/golang`
+  `-dev`. Every stage is DHI, so one publisher signs every builder. A local
+  `just build` does not verify, and needs `docker login dhi.io`; `just
+  ci-tools && .ci/bin/divbast-verify-images` verifies, with cosign from
+  `mise.toml`
+- **No binary may carry a file capability.** A binary with a file
   capability cannot be exec'd at all under `--cap-drop ALL` — it dies with
   `Operation not permitted` and exit 126 — and the contract suite's
-  `file-capability` check, which runs `template version`, fails on one, as
-  `no-file-capability-xattr` fails on one anywhere in the image
-- **The application is one root-owned file, never written.** The binary
-  is `COPY`'d from the build stage, and the app writes nothing, not even to
-  `/tmp`
+  `file-capability` check, which runs `divbast-lidarr version`, fails on
+  one, as `no-file-capability-xattr` fails on one anywhere in the image.
+  `TestFpcalcRuns` runs `fpcalc`, and `TestFFmpegTranscodes` runs `ffmpeg`
+  and `ffprobe` from `PATH`, as Lidarr's user under the contract
+- **The application is root-owned and never written.** `/app`,
+  `/usr/local/bin` and `/usr/local/share/doc/ffmpeg` are `COPY`'d from
+  the build stages. Lidarr writes to
+  `/config`, `TMPDIR` (`/tmp`) and the user's music and downloads alone
 
-### The PHP layer
+### The rules the build keeps
 
-`layers/php` is the template's PHP app, kept for a PHP app to move into
-place: it is linted (PHPStan from `layers/php/composer.lock`, REUSE,
-ShellCheck) but never built. `Containerfile.fragment` holds the lines that
-build it, which Renovate's dockerfile manager reads by its name. That
-manager reads an `ARG` only where a `FROM` uses it, so every image a
-fragment pins sits where a `FROM` or a `COPY --from=` uses it: hence the
-fragment's `FROM ${RUNTIME_IMAGE}`, which the Containerfile has already.
-A layer added for another stack keeps to the same rule, and
-`renovate.json` stays out of it. Once in place, these hold of it, as they
-do of Baikal and LibreSpeed:
-
-- **The FrankenPHP binary is divbast/frankenphp's, by digest.** The
-  fragment copies it from `ghcr.io/divbast/frankenphp:baikal@sha256:…`, the
-  binary built for the Baikal image: the page needs only core PHP, so any
-  of divbast/frankenphp's binaries would do. `divbast-verify-images` has
-  gh verify that frankenphp's own `build.yml`, on its main, attested that
-  digest, and refuses the image named anywhere but that `COPY`'s
-  `--from=`: never in an `ARG`, a `LABEL` or a `RUN`. Upstream's own build
-  carries `cap_net_bind_service=ep`, which divbast/frankenphp refuses to
-  publish
-- **8080 is an allowlist in the Caddyfile.** **No `php_server`**: it hands
-  every path it finds no file for to `index.php`, so `/healthz` on 8080
-  would answer 200. Every route is a `handle` block, because Caddy sorts a
-  bare directive after the catch-all 404, and Caddy's admin API is off
-  (`admin off`)
-- **`/healthz` checks `ini`** from inside the server, and the page's
-  `PHP_SAPI` reads `frankenphp` only when FrankenPHP's server ran it.
-  `allow_url_fopen` is off
-- **The application tree stays root-owned and unwritten.** Caddy's own
-  state lives in `/tmp/caddy`, through `XDG_DATA_HOME` and
-  `XDG_CONFIG_HOME`. The fragment copies each file with no `--chmod`,
-  because `COPY --chmod` gives a directory it creates the file's mode, and
-  a directory of mode 0644 cannot be entered
-
-### The .NET layer
-
-`layers/dotnet` is the template's .NET app, kept for a .NET app to move
-into place, and like the PHP layer it is linted but never built. Its
-`Containerfile` is a whole one, which replaces the root one at step 0 and
-is written for the layout that leaves. It keeps the layer rule with no
-stand-in: each of its three pins sits where a `FROM` uses it. `just lint`
-runs `dotnet-lint`, which checks the demo is formatted as `dotnet format`
-leaves it and builds with every warning an error, in the SDK image the
-backend stage pins, then hadolint and `docker build --check` over the
-Containerfile. In CI, the lint job first verifies the layer's images,
-through `build.yml`'s `verify-containerfiles`, so none runs unverified.
-The Go gates, ShellCheck, shfmt and REUSE reach the rest through their own
-globs.
-
+- **Never patch upstream.** The one change to an upstream file is the
+  backend stage's rewrite of `global.json` by `test/global-json.sh`, which
+  keeps upstream's SDK version as the floor and adds `"rollForward":
+  "latestFeature"`, so a later SDK band, which Renovate moves the image to,
+  can build; it never ships. A different change to Lidarr's source is a
+  fork, which the design ruled out
 - **Two build-stage checks guard a .NET major**, which would otherwise
   show only as dotnet's own error, or as an app that will not start.
-  `test/global-json.sh` holds the SDK an upstream's `global.json` names to
-  the image's major and minor, then lets it roll forward to any later
-  feature band; `test/runtime-major.sh` holds the published app's
-  runtimeconfig to the runtime image's tag. Each fails a mismatch with the
-  steps to take, naming "A .NET major" below. Each is a build-stage check
-  under "Code quality"'s rules, and its Go test, `test/globaljson` or
-  `test/runtimemajor`, also checks the Containerfile runs it where it
-  must. The two scripts and their tests are prowlarr-oci-image's too,
-  byte for byte but for the SPDX line, so a change to one goes to both
-- **The demo has no `global.json`**, and its target framework is whichever
-  its SDK bundles. Renovate's NuGet manager would move a `global.json` on
-  its own, apart from the SDK image: a second SDK pin, free to disagree
-  with the first. An upstream's arrives with its source at build time,
-  where Renovate never sees it
+  `test/global-json.sh` holds the SDK `global.json` names to the image's
+  major and minor before it rewrites the file; `test/runtime-major.sh`
+  holds the runtimeconfigs copied to `/out/bin` to the runtime image's
+  tag, which the backend stage reads through a bare `ARG RUNTIME_IMAGE`,
+  alone on its line, since Renovate would read anything after it as the
+  runtime pin, and declared just above the check, since every later RUN
+  has an ARG's value in its cache key and a new runtime pin would
+  otherwise rebuild the restore and publish. Each fails a mismatch with
+  the steps to take, naming [A .NET major](#a-net-major). Each is a
+  build-stage check under "Code quality"'s rules, and its Go test,
+  `test/globaljson` or `test/runtimemajor`, also checks the Containerfile
+  runs it where it must. The two scripts and their tests are
+  oci-image-template's .NET layer's, prowlarr-oci-image's and
+  sonarr-oci-image's too, byte for byte but for the SPDX line, so a change
+  to one goes to all four
+- **The version and the branch are always passed.**
+  `-p:AssemblyVersion=${LIDARR_VERSION}` and
+  `-p:AssemblyConfiguration=develop` override upstream's `10.0.0.*` and
+  `Release-dev`, under which Lidarr runs as a development build, with
+  analytics and Sentry forced on whatever the user sets, the API
+  reporting 10.0.0.x, and every plugin's minimum-version check passed.
+  They are `-p:` properties, so no file is edited. The probe compares the
+  status's version with the same value, through `-X main.version`.
+  `develop` in the assembly is the branch upstream's own CI stamps a
+  nightly with; `nightly` in `package_info` is the update channel the
+  image follows, which Lidarr reports and its update check asks about.
+  Both stay until the image moves to stable, when both become `master`
+- **NuGet: no lock files, signatures verified, advisories warned of.**
+  Upstream keeps no `packages.lock.json`, pins every package by an exact
+  version from nuget.org alone, whose versions are immutable and
+  repository-signed, and NuGet restores the lowest version a range allows.
+  Ours would need regenerating by a person at every upstream bump. So the
+  backend stage sets `DOTNET_NUGET_SIGNATURE_VERIFICATION=true`, and
+  publishes under `--network=none` once restored. Upstream treats every
+  warning as an error, NuGet's audit among them, so a new advisory against
+  a package an already-pinned commit restores would fail the build, and
+  hold back every other update, the runtime's patches included, until
+  upstream moved: `-p:WarningsNotAsErrors=NU1901%3BNU1902%3BNU1903%3BNU1904`
+  keeps those four warnings, and ci's scan blocks a vulnerable package the
+  image does not already ship. The msbuild switch `-warnNotAsError` does
+  not reach NuGet; only the property does. Proved for Lidarr: with one of
+  upstream's six `NuGetAuditSuppress` lines deleted, the restore fails with
+  `error NU1902`, and the property turns it back into a warning
+- **The frontend runs no install script.** `yarn install
+  --frozen-lockfile --ignore-scripts`, then `yarn run build --env
+  production`, upstream's webpack build: Lidarr's own package.json has no
+  install script, the build needs none, and an install script is how most
+  malicious npm releases have run. A dependency's script the build cannot
+  do without would fail it, but an install script upstream adds to its own
+  package.json would be skipped without a word, and the UI built without
+  whatever it did: read a Lidarr bump's package.json changes for one. The
+  fix is to name why in the Containerfile, not to drop the flag quietly
+- **fpcalc gets its execute bit back.** NuGet extracts it without one; the
+  backend stage `chmod`s it and asserts it is executable, and
+  `TestFpcalcRuns` runs it and finds no fpcalc entry on the Health page,
+  which is where a missing bit shows: Lidarr calls it too old, not missing
+- **No tag check on a nightly.** A nightly has no tag, so the fetch stage
+  checks out `LIDARR_COMMIT` by its full hash and asserts nothing more.
+  The version beside it is Azure's record of that build, carried by
+  Renovate, which writes both lines in one change. An ancestry check
+  against develop would turn the build red, and hold back the base's
+  patches, each time upstream rewrites develop
+- **Every stage is DHI.** The fetch runs in the Node `-dev` image, which
+  ships git, the probe and ffmpeg stages in the Go `-dev` image, and the
+  frontend in the same Node image, with yarn 1 and `--frozen-lockfile`.
+  The ffmpeg stage installs its six packages from DHI's own Debian
+  repository, each pinned to a `+dhi` build, which Debian's repository
+  beside it does not have, so apt never falls back to Debian's. Never add a
+  stage from another publisher, and never set
+  `DOTNET_SYSTEM_GLOBALIZATION_INVARIANT`: it breaks name matching and
+  release parsing
+- **ffmpeg is built narrow, and checked.** FFmpeg's source at the tag
+  `FFMPEG_VERSION` names, whose commit `FFMPEG_COMMIT` pins and the stage
+  asserts the tag still names; configured from `--disable-everything` with
+  only what the owner chose for Lidarr's plugins: the audio formats a
+  download brings (MP3, AAC, Opus, Vorbis, WMA, AC-3, E-AC-3, DTS, FLAC,
+  ALAC, WavPack, Monkey's Audio, TrueHD, WMA Lossless and PCM), cover art,
+  and the encoders, containers and filters to write MP3, AAC, Opus, Vorbis,
+  FLAC, ALAC and JPEG art; no network, no devices, nothing autodetected, no
+  `--enable-gpl`; and `--toolchain=hardened`, FFmpeg's own FORTIFY_SOURCE,
+  stack protection and position-independent binaries bound at load, which
+  a plain configure would otherwise leave out. Every list is explicit,
+  never a glob, which would take the platform builds configure then warns
+  about, and **any configure warning fails the stage**: configure drops a
+  component it cannot build, one a new FFmpeg renamed, removed or gated,
+  with no more than a warning, and FFmpeg's pull requests merge
+  themselves, so without the guard a promised format could vanish. LAME,
+  Opus and Vorbis link in statically, their `.so` links removed in the
+  stage, since the runtime base carries none of them; glibc, libm and zlib
+  stay shared. Their notices, FFmpeg's licence and the Debian copyright
+  files of LAME, Opus, Vorbis and Ogg (whose BSD licence asks for it),
+  ship in `/usr/local/share/doc/ffmpeg`, which `TestFFmpegNotices` holds;
+  the README has no licence section. `test/ffmpeg-check.sh`, the stage's
+  last step, holds that each binary answers as itself, is
+  position-independent and bound at load, that ffmpeg has the three
+  library encoders, and that neither needs a shared library but libc,
+  libm, libz and the loader; its Go test, `test/ffmpeg`, runs it over
+  fixtures and checks the Containerfile runs it where it must.
+  `TestFFmpegTranscodes` encodes to and decodes back from MP3, Opus,
+  Vorbis and AAC. The scan cannot see a static FFmpeg, so the narrow,
+  hardened build and Renovate's FFmpeg pull requests are the mitigation.
+  Widening it is the owner's call
+- **fpcalc carries an FFmpeg of its own,** statically linked into
+  upstream's NuGet pin of Chromaprint (libavcodec 63.1 at this pin), which
+  the image neither narrows nor hardens and the scan cannot see. Lidarr
+  runs it on every file it imports. It moves only when upstream moves the
+  package; the README says so, and that Allow Fingerprinting set to Never
+  stops Lidarr running it
+- **The probe is stdlib Go.** `cmd/divbast-lidarr` and `internal/probe`
+  import nothing outside the standard library, since the build context
+  leaves `.ci/` out, and divbast/ci's `probekit` would put ci code in the
+  image
+- **`LIDARR_VERSION` and `LIDARR_COMMIT` stay adjacent, in that order,
+  and so do `FFMPEG_VERSION` and `FFMPEG_COMMIT`.** `renovate.json`'s
+  nightly manager moves the first two in one PR from the custom datasource
+  `lidarr-nightly`: Azure DevOps' public build list, CI builds of
+  `refs/heads/develop` that succeeded, never a pull request's build, whose
+  numbers share the counter. Its transform builds `releases` in brackets,
+  since JSONata collapses a one-element list. If upstream ever moves its
+  builds off Azure, the list stops growing and nothing fails: the image
+  stays on its last nightly with no red check, which the README says.
+  The FFmpeg manager reads FFmpeg's tags, versioned so a `-dev` tag never
+  matches, with the commit a tag names as the digest. The libraries'
+  manager reads the six ` name=version \` lines ending `+dhiN` with the
+  `deb` datasource on DHI's index
+- **The stable watch stays, until the move to stable.** The
+  Containerfile's `# LIDARR_STABLE_V4=0.0.0.0` line is `renovate.json`'s
+  watch manager's: Renovate writes Lidarr's first stable v4 release there,
+  offered only releases GitHub calls stable and of v4 or later, never its
+  tags, which also hold Sonarr's and Radarr's, and `TestNoV4StableYet`
+  (`test/stable`) fails once it moves, and if the line is lost or
+  doubled. It lives in the Containerfile because the recommended preset
+  ignores every path under `test/`. Its floor, 0.0.0.0, shares no major,
+  minor and patch with the `4.0.0.N` nightlies, since Renovate offers a
+  pre-release that shares all three with the current version. The nightly
+  and the watch share the group `Lidarr`, with `separateMajorMinor` off so
+  the watch's first, major, update stays in the group's branch; a branch
+  holding the watch's update is not automerged, and its check holds it
+  red. So once v4 stable exists, the nightly pins stop moving. FFmpeg and
+  its libraries stay outside the group, so the freeze never holds them.
+  Re-prove every manager with a local Renovate run before changing one
 
-Once in place, these hold of it, and of Prowlarr too, except where a
-bullet says otherwise:
-
-- **Every stage is a Docker Hardened Image, by digest**, its signature by
-  Docker verified before anything is built: the SDK, the probe's Go, and
-  the runtime, `dhi.io/aspnetcore`, which has no shell or package manager.
-  Renovate moves the SDK and runtime in one pull request, since an app
-  needs the runtime patch its SDK knows
-- **The app is framework-dependent**, so a rebuild of the runtime image
-  patches the .NET it runs on. It is published offline, after a restore,
-  to `/app/bin`, with no target framework in any path; `/app/bin` is
-  root-owned and never written. Here it is also the runtime stage's
-  `WORKDIR`, and so ASP.NET Core's content root; Prowlarr's runtime stage
-  sets no `WORKDIR`
-- **One port, 8080, with health beside the page.** The apphost is PID 1
-  and the one listener, with .NET's diagnostics socket off. An upstream
-  .NET app cannot host a probe subcommand, so the probe, `divbast-template`,
-  is a static Go binary of its own, on the standard library, which the
-  `HEALTHCHECK` runs. The contract has no health port: `HealthPort` 0, and
-  `HealthPath` the app's own health endpoint, here `/healthz`, and
-  Prowlarr's `/ping`
-
-### A .NET major
+## A .NET major
 
 A .NET major moves by hand, about once per LTS, because neither of its two
-pull requests can go green alone: upstream's retargeted release needs the
+pull requests can go green alone: Lidarr's retargeted nightly needs the
 new SDK, and the SDK and runtime the Dashboard holds back cannot build or
-run the app upstream had before. The build-stage checks above fail each
-with a message naming this section; only an upstream with no
-`global.json` that retargets first fails on dotnet's own error instead.
-Each step needs the user's go-ahead:
+run the nightly before it. The backend stage's two checks fail each with a
+message naming this section; only were Lidarr to drop its `global.json`
+and retarget first would dotnet's own error come instead. Each step needs
+the user's go-ahead:
 
-1. The app's Renovate PR is red with one of the checks' messages, where
-   `W` is the new .NET:
+1. Lidarr's Renovate PR, the group `Lidarr`, which moves `LIDARR_VERSION`
+   and `LIDARR_COMMIT`, is red with one of the checks' messages, where `W`
+   is the new .NET:
    `ERROR: global.json asks for the .NET W SDK; … Approve the .NET W major …`
    or `ERROR: the app targets .NET W; … Approve …`.
 2. Approve the major, the "dhi .NET SDK and runtime" group, on the
@@ -274,11 +413,70 @@ Each step needs the user's go-ahead:
    fails it with `ERROR: … A .NET major waits until … retargets …`, which
    here is expected, and no reason to stop.
 3. On a branch from main, take both Renovate commits with
-   `git cherry-pick -S`, open a PR, and merge it when green.
+   `git cherry-pick -S`, open a PR, and merge it when green. Nothing the
+   Containerfile runs names the target framework, so those two commits are
+   the whole change: the backend stage finds the one folder matching
+   `_output/net*/<rid>/publish`, and refuses none or several.
 4. Close the two Renovate PRs.
 
-For the template alone, approving the major is the whole step: the demo's
-target framework follows its SDK, and no upstream waits on it.
+A .NET major also changes the plugin asset name Lidarr looks for
+(`net<major>.0`), so plugins installed under the old one stop installing
+until their authors publish for the new: say so in the PR.
+
+## Moving to stable
+
+The image follows Lidarr 4's nightlies until upstream publishes v4
+stable, and then moves to stable by hand, once. Nobody has to be watching
+for it: Renovate notices, and stops the nightly line where it is. Each
+step needs the user's go-ahead:
+
+1. The group `Lidarr`'s Renovate PR is red: it moves the Containerfile's
+   `# LIDARR_STABLE_V4=` line to Lidarr's first stable v4 release, and
+   `TestNoV4StableYet` fails it with `Lidarr v4 is stable: release <it>.
+   The nightly line stops here until the image moves to stable: CLAUDE.md,
+   'Moving to stable'.` Every nightly after it lands in that same PR, so
+   `main` stays on the nightly it has, and stall's `stuck` check goes red
+   within a day.
+2. Pick the stable release to move to: the first that carries every
+   database migration the pinned nightly has, since a Lidarr older than the
+   database it opens meets migrations it does not know. Each file under
+   `src/NzbDrone.Core/Datastore/Migration/` at `LIDARR_COMMIT` must be at
+   the stable release's commit, by number and name. Nightlies run ahead of
+   upstream's promotions, so the pinned commit is usually newer than the
+   first stable's, and `git merge-base --is-ancestor` fails: compare the
+   files. If the pinned nightly has a migration the stable lacks, wait for
+   the next stable.
+3. On a branch from main, in one PR:
+   - `renovate.json`: the nightly manager follows Lidarr's GitHub
+     releases, stable ones alone, as prowlarr-oci-image's manager does
+     (`github-releases`, the `v` added and taken off, the four-number
+     versioning); delete `customDatasources.lidarr-nightly`, and the
+     watch's manager and its rule; drop `Lidarr v4 stable` from the group
+     rule's `matchDepNames`, and its `separateMajorMinor` and the
+     description that explains them, keeping its `lidarr` label and
+     `lidarr:` prefix; say so in the descriptions; FFmpeg's and the
+     libraries' managers stay;
+   - the Containerfile: `LIDARR_VERSION` and `LIDARR_COMMIT` to the release
+     picked and the commit its tag names; the fetch stage asserts the
+     release's tag still names the commit, as prowlarr-oci-image's does;
+     delete the `# LIDARR_STABLE_V4=` line and its comment;
+     `-p:AssemblyConfiguration=master` and `Branch=master`, upstream's
+     names for stable builds; the comments that say nightly or develop;
+   - delete `test/stable`;
+   - `test/acceptance`: `nightlyBranch` becomes `master`. `TestMigratedConfig`
+     then needs a `config.xml` on another branch for Lidarr to change:
+     `migratedConfig`'s `<Branch>` becomes `nightly`, as a `config.xml`
+     this image wrote before the move says, and `branchChanged` becomes
+     `External updater uses branch master instead of the currently selected
+     nightly, changing to master.`, the line Lidarr then logs;
+   - `build.yml`'s `description`, this file, the README and divbast/.github's
+     profile row: drop "nightly", the Azure source and its gap, and this
+     section.
+
+   Open the PR, and merge it when green.
+4. Close Renovate's red PR if it is still open (Renovate usually closes
+   it, or rebases it onto the new main, on its next run), and mark
+   Lidarr's phase 7 done in the Servarr programme's records.
 
 ## Where the shared parts live
 
@@ -290,8 +488,7 @@ target framework follows its SDK, and no upstream waits on it.
     amd64 and arm64 once every image it builds from verifies; the acceptance
     suite on each under Docker and rootless Podman; the scan),
     `app-publish.yml` (the daily slot and the button only: push, index,
-    attest, verify, then tag and check as an anonymous client pulls it;
-    its `rehearse` input sends all of that to a registry inside the job),
+    attest, verify, then tag and check as an anonymous client pulls it),
     `renovate.yml` and `stall.yml`. `build.yml`, `renovate.yml` and
     `stall.yml` here call them, and keep their own triggers and the
     `required` job;
@@ -311,39 +508,37 @@ target framework follows its SDK, and no upstream waits on it.
   moves every pin of it at once. `just setup`, and the pin check
   (`divbast-pin`) in each ci workflow that runs this repository's code,
   refuse workflows that call ci at more than one commit
-- **divbast/frankenphp** builds and attests the PHP layer's binary,
-  `ghcr.io/divbast/frankenphp:baikal`, with its pins and the in-build
-  checks on them
 - **divbast/renovate-config** holds the presets `renovate.json` extends.
-  `renovate.json` adds nothing of its own: an app adds its upstream's
-  manager and rule there
-- **divbast/infra** holds the org's settings, this repository's rulesets
-  and its template flag, the `divbast-renovate` App, the `renovate`
-  environment and `OCI_IMAGE_TEMPLATE_AUTOMERGE`
+  `renovate.json` adds Lidarr's nightly datasource, its four managers and
+  their rules, and nothing else
+- **divbast/infra** holds the org's settings, this repository's rulesets,
+  the `divbast-renovate` App, the `renovate` environment and
+  `LIDARR_AUTOMERGE`
 
 ## Key commands
 
 - `just setup` — fetch divbast/ci into `.ci/` at the commit the workflows
-  pin, then install the pinned toolchain, and PHPStan for the PHP layer. One command on a
-  fresh clone, and again whenever the pin moves; `just lint` fails, naming
-  it, when `.ci` is not at the pinned commit (`ci-fresh`)
-- `just build` — build the image locally. It does not verify the images it
-  builds from; `just ci-tools && .ci/bin/divbast-verify-images` does, with
-  cosign from `mise.toml`
+  pin, then install the pinned toolchain. One command on a fresh clone, and
+  again whenever the pin moves; `just lint` fails, naming it, when `.ci` is
+  not at the pinned commit (`ci-fresh`)
+- `just build` — build the image locally, after `docker login dhi.io`. It
+  does not verify the images it builds from; `just ci-tools &&
+  .ci/bin/divbast-verify-images` verifies, with cosign from `mise.toml`
 - `just acceptance` — `go test ./test/acceptance/...` against the image
   `just build` wrote, under `ENGINE` (docker unless it says podman),
   through `divbast-testcount`, which fails the run unless a test passed and
   none failed or skipped. `just IMAGE=… acceptance` tests another image.
-  `ENGINE=docker IMAGE=localhost/oci-image-template:dev mise exec -- go test
-  -run TestServes ./test/acceptance/` runs one test
+  `ENGINE=docker IMAGE=localhost/lidarr:dev mise exec -- go test
+  -run TestServes ./test/acceptance/` runs one test. A full run takes
+  about 15 seconds under Docker and 45 under Podman
 - `just test` — build, then the acceptance suite
 - `just lint` — pinact, zizmor, actionlint, ShellCheck and shfmt, the Go
   gates (the compiler, `go vet`, `go fix -diff`, `go mod tidy -diff`,
   `golangci-lint fmt --diff` and `golangci-lint run`), `go-test`, `reuse
-  lint`, hadolint, `docker build --check`, PHPStan over the PHP layer, and
-  `dotnet-lint`, hadolint and `docker build --check` over the .NET layer.
-  `go-test` runs every Go test under the race detector; the acceptance
-  suite skips there, since `IMAGE` is unset
+  lint`, hadolint and `docker build --check`. `go-test` runs every Go test
+  under the race detector, `test/globaljson`, `test/runtimemajor`,
+  `test/ffmpeg` and `test/stable` among them; the acceptance suite skips
+  there, since `IMAGE` is unset
 - `just archive`, `just scan` — write the image as an OCI archive, then run
   `divbast-scan` over it and the published `:latest`. Needs network access
   to ghcr.io
@@ -360,56 +555,40 @@ target framework follows its SDK, and no upstream waits on it.
   pinact's and zizmor's, take a fine-grained token from `GITHUB_TOKEN` and
   nothing else, as divbast/ci's README says; CI passes its own
 - **Go builds with the toolchain mise installs and nothing else.**
-  `GOTOOLCHAIN=local` keeps `go.mod`'s line from downloading another. And
-  `GOFLAGS=-mod=readonly`, because a PHP app made from the template keeps
-  Composer's `vendor/` at the module root, where Go would take it for a Go
-  vendor directory once `go.mod` has a `require`, and refuse to build;
-  readonly is the default outside vendor mode, and still refuses to edit
-  `go.mod`
-- **`just lint` needs a running Docker daemon**, for `docker build --check`,
-  logged in to dhi.io for the .NET layer's images, which `dotnet-lint` runs
-  and `--check` reads. `--check` is a buildx flag with no podman
-  equivalent, so that gate does not honour `ENGINE` and does not run
-  without dockerd
-- **The .NET SDK is not in mise.** The demo is linted in the SDK image the
-  .NET layer's backend stage pins, which CI verifies first: one SDK pin,
-  and no second one in `mise.toml` to disagree with it. `dotnet-lint` runs
-  it under Docker whatever `ENGINE` says, since the dhi.io login is Docker's
+  `GOTOOLCHAIN=local` keeps `go.mod`'s line from downloading another, and
+  `GOFLAGS=-mod=readonly` refuses to edit `go.mod`
+- **`just lint` needs a running Docker daemon**, for `docker build --check`.
+  `--check` is a buildx flag with no podman equivalent, so this one gate does
+  not honour `ENGINE` and does not run without dockerd
 - **`just scan` needs `skopeo` on `PATH`.** It reads the published image with
   [skopeo](https://github.com/containers/skopeo), which no `mise.toml` entry
   provides, so `just ci` needs it too. CI runners already have it
-- **PHP is a deliberate exception.** `php` and
-  `composer` come from the host, not from mise: mise's only PHP backend
-  compiles PHP from source, which is minutes added to every CI run in order to
-  analyse a handful of files. PHPStan is therefore pinned by the PHP layer's
-  `composer.lock`, and its `phpstan.neon` sets `phpVersion` so the
-  *analysis target* is fixed no matter which PHP runs the analyser
-- **So the PHP layer carries `composer.json`, `composer.lock` and a
-  `vendor/`, and that deserves an explanation**, because a PHP image's whole
-  claim is that no PHP toolchain reaches it. None of it does. The Containerfile
-  copies named paths and never the build context, `vendor/` is gitignored, and
-  `.dockerignore` excludes it, and the whole of `layers/`, so that a `COPY`
-  written broadly at some later date cannot quietly change the answer. `composer.json` has no `require`
-  section, no `autoload` and no package name on purpose: Composer is asked to
-  install a linter here, not to make this a PHP project
-- Licensing for `composer.json`, `composer.lock` and `renovate.json` lives in
-  `.license` sidecars. JSON has no comment syntax, and an SPDX tag written as
-  a string value carries the closing quote into the expression, which `reuse`
-  rejects
+- **The acceptance suite under Docker needs `zstd` on `PATH`.** Every
+  layer of a DHI image is zstd, and ci's harness reads the layers of the
+  image Docker saves through the `zstd` command, since Go's standard
+  library has no zstd reader yet; without it the contract's
+  `no-file-capability-xattr` check fails, naming the layer. No
+  `mise.toml` entry provides it. GitHub's runners have it, and a Mac gets
+  it from Homebrew (`brew install zstd`). Podman saves its layers
+  uncompressed, so a Podman run does not need it
+- **`renovate.json` has a `.license` sidecar.** JSON has no comment syntax,
+  and an SPDX tag written as a string value carries the closing quote into
+  the expression, which `reuse` rejects. So does `tone.flac`, the
+  transcode test's fixture, CC0-1.0, made by the image's own ffmpeg
 
 ## Code quality
 
 - All linter gates are enforced as errors — fix them, don't suppress them. Any
   suppression, anywhere, needs an explicit, comment-level justification beside
   it to be accepted
-- **The scan blocks only what a change would add, and is advisory while
-  nothing is published.** `divbast-scan` scans the candidate and the
-  published `:latest` for the same arch from one Trivy database, and fails
-  only on a HIGH or CRITICAL finding, the same vulnerability in the same
+- **The scan blocks only what a change would add, and never passes a
+  report blind to the OS.** `divbast-scan` scans the candidate and the
+  published `:latest` for the same arch from one database, and fails only
+  on a HIGH or CRITICAL finding, the same vulnerability in the same
   package, that the published image lacks. No release can make an
   advisory against something already shipped any worse, so blocking on one
   only holds back whatever else the release fixes. Whether anything is
-  published is the registry's to say, never Trivy's: the scan reads
+  published is the registry's to say, never the scanner's: the scan reads
   `:latest` as an anonymous client, and when ghcr.io refuses, asks GitHub
   why, with the check job's token, which is what its `packages: read` is
   for. Not published yet, or a package still private: every finding is
@@ -418,30 +597,43 @@ target framework follows its SDK, and no upstream waits on it.
   public image the registry refuses, a registry that cannot be reached, or
   GitHub not answering fails the scan rather than waving it through. A
   local `just scan` never asks GitHub, so a refusal there is advisory,
-  with a warning that only CI can tell what it means
-- REUSE-compliant SPDX headers on every file; licence is **BSD-2-Clause**.
-  The image's licences label names only that, because the image ships
-  nothing else of its own; an app that ships an upstream's files adds the
-  upstream's licence to the label, and leaves which file carries which
-  licence to REUSE and the files' SPDX headers
+  with a warning that only CI can tell what it means. **None of that
+  softens the OS guard:** a report in which the scanner recognised no
+  operating system, or saw no OS package, fails the scan, for the
+  candidate and the published image alike and whether or not anything is
+  published. The base says `ID="debian"` today, so Trivy scans it, and
+  applies DHI's signed VEX statements for the runtime image, so Trivy's
+  reading of DHI's `+dhiN` packages as plain Debian ones does not
+  over-report; once DHI's base says `ID=dhi`, divbast/ci scans it with
+  Grype, which reads DHI's own advisories. Neither sees the static
+  FFmpeg, nor fpcalc and the FFmpeg inside it
+- REUSE-compliant SPDX headers on every file; licence is **GPL-3.0-only**.
+  The image's licences label names only that. Lidarr's own licence file
+  ships in `/app/bin/LICENSE.md`, where upstream's tarball puts it, and the
+  label and the README say nothing more of it
 - **The acceptance suite is Go, on divbast/ci's harness.** Every
-  container it starts runs under `harness.Contract("16m")`, the *exact*
-  confinement the contract claims, `--security-opt no-new-privileges` and
-  `--tmpfs /tmp:size=16m,noexec,nosuid,nodev` included, so a
-  check can never pass under looser settings than we ship. What CI proves
-  is what ships. `TestContract` runs ci's contract suite against the image;
-  `TestServes` and `TestStopsPromptly` are the template's own. Each serves through
-  the harness's `Serve` (or `StartServing`, for a container that must be
-  started apart from its first request), which publishes on the host's
-  loopback at ports the engine picks, so no two tests, or two suites on one
-  host, ask for the same one. The assertions (`StatusIs`, `Answers`,
-  `Refuses` and the rest) are the harness's too, shared with every divbast
-  image. An app gives each thing it serves a test, one topic per file
+  container that runs Lidarr runs under `harness.Contract("64m")`, the
+  *exact* confinement the contract claims, `--security-opt
+  no-new-privileges` and `--tmpfs /tmp:size=64m,noexec,nosuid,nodev`
+  included, so a check can never pass under looser settings than we ship.
+  What CI proves is what ships. The one exception, `asRoot`, runs only
+  the suite's own probe (`test/probe`), to leave a volume as root would.
+  `TestContract` runs ci's contract suite against the image; the rest are
+  Lidarr's own, one topic per file, as the README's "The pipeline" lists
+  them. Each serves through the harness's `Serve`, which publishes on the
+  host's loopback at ports the engine picks, so no two tests, or two
+  suites on one host, ask for the same one. The assertions (`StatusIs`,
+  `Answers`, `Refuses` and the rest) are the harness's too, shared with
+  every divbast image, and every wait is `harness.Poll`. Each thing the
+  image serves or guarantees has a test. Under Podman every container gets
+  `--log-driver k8s-file`: Podman's default under systemd, journald, drops
+  a unit's messages past its rate limit, and a run starting twenty
+  containers at once can lose the very lines its tests wait for
 - **Go is modern and idiomatic, and linted strictly**, under ci's
   `go/golangci.yml`. Bash is for what is short and will stay so: the
   justfile's recipes. A check that runs inside a Containerfile build stage
   is the exception, since a build stage has bash and no Go: it stays bash,
   under ShellCheck `enable=all`, shfmt and `set -euo pipefail`, with a Go
-  test that runs it against fixtures and sees each way it can fail fail
+  test that runs it against fixtures and sees each way it can refuse
 - A test suite that has never failed proves nothing. When adding a check, prove
   it can fail before trusting it
