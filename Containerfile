@@ -35,7 +35,7 @@ ARG FFMPEG_COMMIT=74e4393595cf2b5857f0da925c4e0dd74ea306e5
 ARG RUNTIME_IMAGE=dhi.io/aspnetcore:10.0.15-debian13@sha256:a7b0925e3186b00ef60034dd8552cefd4e824520b03ddb0bab3bcb3a90a5805b
 
 # The same image as the frontend's, which ships git and CA certificates.
-FROM dhi.io/node:26.13.1-debian13-dev@sha256:16397506bf37325c0a824f68ef6353dc926312b4ffa8fdc82f4baa9d2d3c3f1e AS fetch
+FROM dhi.io/node:26.13.1-debian13-dev@sha256:f93de13abcc8050541e2787a7ef71e776e197545b66f3479d57fbfc2c937609f AS fetch
 ARG LIDARR_COMMIT
 # git checks a fetch by commit against its hash. There is no tag to check
 # it against: a nightly has none, and an ancestry check against develop
@@ -65,7 +65,7 @@ RUN set -eux; \
 # yarn.lock through upstream has one way fewer to act. NODE_ENV stays unset
 # for the install, where production would skip the devDependencies webpack
 # is among; --env production is the build's own switch.
-FROM dhi.io/node:26.13.1-debian13-dev@sha256:16397506bf37325c0a824f68ef6353dc926312b4ffa8fdc82f4baa9d2d3c3f1e AS frontend
+FROM dhi.io/node:26.13.1-debian13-dev@sha256:f93de13abcc8050541e2787a7ef71e776e197545b66f3479d57fbfc2c937609f AS frontend
 WORKDIR /src
 COPY --from=fetch /src ./
 RUN yarn install --frozen-lockfile --ignore-scripts --network-timeout 120000 \
