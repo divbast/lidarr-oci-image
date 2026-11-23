@@ -32,7 +32,7 @@ ARG FFMPEG_COMMIT=74e4393595cf2b5857f0da925c4e0dd74ea306e5
 # manager, and its nonroot user 65532. The app is built framework-dependent,
 # so a rebuild of this image patches the runtime. CI verifies its signature
 # by Docker before anything is built, as it does every stage's image below.
-ARG RUNTIME_IMAGE=dhi.io/aspnetcore:10.0.15-debian13@sha256:192b304b000749d73cd7a534ddc3763056b2ac0a60025bf786fe93f9e8f287fa
+ARG RUNTIME_IMAGE=dhi.io/aspnetcore:10.0.15-debian13@sha256:a7b0925e3186b00ef60034dd8552cefd4e824520b03ddb0bab3bcb3a90a5805b
 
 # The same image as the frontend's, which ships git and CA certificates.
 FROM dhi.io/node:26.13.1-debian13-dev@sha256:16397506bf37325c0a824f68ef6353dc926312b4ffa8fdc82f4baa9d2d3c3f1e AS fetch
@@ -72,7 +72,7 @@ RUN yarn install --frozen-lockfile --ignore-scripts --network-timeout 120000 \
     && yarn run build --env production
 
 # The backend, framework-dependent for this stage's own architecture.
-FROM dhi.io/dotnet:10.0.404-sdk-debian13@sha256:fb5f5e08c1de146be3fd2fcb134d48dbb90ab8955524078b73081fa168998dfb AS backend
+FROM dhi.io/dotnet:10.0.404-sdk-debian13@sha256:3220e35773a538c382c937a56258e4bda12e0418a20c47a1f03255fdaca97438 AS backend
 ARG LIDARR_VERSION
 ARG TARGETARCH
 # Upstream keeps no lock file, and pins every package by an exact version
