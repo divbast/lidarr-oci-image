@@ -179,7 +179,7 @@ ARG RUNTIME_IMAGE
 RUN /tmp/runtime-major.sh /out/bin "${RUNTIME_IMAGE}"
 
 # The image's health probe, static and on the standard library alone.
-FROM dhi.io/golang:1.27.4-debian13-dev@sha256:6abf5b6dea0a290cf7851c88effd403bd12acacaf4cee8b88a19de297eaba4ad AS probe
+FROM dhi.io/golang:1.27.4-debian13-dev@sha256:ca700aac1d0d9690382a3f728dd435190d54d95ba93098343abead65428cb410 AS probe
 ARG LIDARR_VERSION
 WORKDIR /src
 # go.mod's replace names ./.ci, which the build context leaves out: the
@@ -197,7 +197,7 @@ RUN CGO_ENABLED=0 GOFLAGS=-mod=readonly GOTOOLCHAIN=local \
 # -dev image, which the probe stage already pulls, has gcc, make, readelf,
 # git and apt, with Docker Hardened Images' own Debian repository beside
 # Debian's.
-FROM dhi.io/golang:1.27.4-debian13-dev@sha256:6abf5b6dea0a290cf7851c88effd403bd12acacaf4cee8b88a19de297eaba4ad AS ffmpeg
+FROM dhi.io/golang:1.27.4-debian13-dev@sha256:ca700aac1d0d9690382a3f728dd435190d54d95ba93098343abead65428cb410 AS ffmpeg
 ARG FFMPEG_VERSION
 ARG FFMPEG_COMMIT
 ARG TARGETARCH
