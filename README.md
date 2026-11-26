@@ -338,19 +338,23 @@ binary is about 11 MB, and transcoding is quick: on an arm64 Mac, a
 60-second test tone became MP3 in about a quarter of a second, Opus or
 Vorbis in about half a second, and AAC in about a second.
 
-**The scan cannot see them.** A static build carries no package record, so
-a vulnerability in FFmpeg or its codec libraries blocks nothing here until
-Renovate moves the pin. The narrow, hardened build is the mitigation:
-decoders and demuxers are where FFmpeg's vulnerabilities are found, this
-one has only the few above, and it is built with FFmpeg's own exploit
-mitigations (`--toolchain=hardened`: FORTIFY_SOURCE, stack protection,
+**The scan reads them from an SBOM.** A static build carries no package
+record, so the image names what went into both binaries in
+`/usr/local/share/divbast/sbom.cdx.json`: FFmpeg at its release, and DHI's
+LAME, Ogg, Opus and Vorbis packages at the versions the build installed.
+The image's `io.github.divbast.scan.sboms` label points the scan there,
+and the scan judges each as it judges every package; Renovate's FFmpeg
+pull requests move the pin. The build is narrow and hardened as well:
+decoders and demuxers are where most of FFmpeg's security fixes land,
+this one has only the few above, and it is built with FFmpeg's hardened
+toolchain (`--toolchain=hardened`: FORTIFY_SOURCE, stack protection,
 position-independent binaries bound at load).
 
 **fpcalc carries an FFmpeg of its own.** `/app/bin/fpcalc`, the
 fingerprinting tool Lidarr itself runs on every file it imports, comes
 from upstream's pin of Chromaprint on NuGet, statically linked with a
 whole FFmpeg (libavcodec 63.1 at this pin). This image neither narrows
-nor hardens that one, the scan cannot see it either, and it moves only
+nor hardens that one, the scan cannot see it, and it moves only
 when upstream moves the package. To stop Lidarr running it, set Allow
 Fingerprinting to Never under Settings, Media Management (shown with
 the advanced settings), at the cost of AcoustID matching.
