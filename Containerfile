@@ -347,6 +347,25 @@ RUN make -j"$(nproc)" \
     && for pkg in libmp3lame0 libogg0 libopus0 libvorbis0a libvorbisenc2; do \
         install -m 0644 "/usr/share/doc/${pkg}/copyright" "/notices/${pkg}.copyright"; \
     done
+# The SBOM of what no image scan can see: ffmpeg and ffprobe, built
+# here, by FFmpeg's CPE at the release FFMPEG_VERSION names, and the four
+# codec libraries linked into them, each by the package URL of the DHI
+# build the stage installed, at the version dpkg reports, so it cannot go
+# stale. ci's divbast-scan reads it through the label below, and judges
+# each as it judges every package.
+RUN ffmpeg_version=${FFMPEG_VERSION#n}; \
+    components=$(printf '{"type":"application","name":"ffmpeg","version":"%s","cpe":"cpe:2.3:a:ffmpeg:ffmpeg:%s:*:*:*:*:*:*:*","licenses":[{"license":{"id":"LGPL-2.1-or-later"}}]}' \
+        "${ffmpeg_version}" "${ffmpeg_version}"); \
+    while read -r pkg version source; do \
+        encoded=${version//+/%2B}; \
+        encoded=${encoded//:/%3A}; \
+        components+=$(printf ',{"type":"library","name":"%s","version":"%s","purl":"pkg:deb/dhi/%s@%s?arch=%s&distro=dhi-13&upstream=%s"}' \
+            "${pkg}" "${version}" "${pkg}" "${encoded}" "${TARGETARCH}" "${source}"); \
+    done < <(dpkg-query -W -f '${Package} ${Version} ${source:Package}\n' libmp3lame-dev libogg-dev libopus-dev libvorbis-dev); \
+    install -d /sbom; \
+    printf '{"bomFormat":"CycloneDX","specVersion":"1.6","version":1,"components":[%s]}\n' "${components}" >/sbom/sbom.cdx.json; \
+    test "$(grep -o '"name":' /sbom/sbom.cdx.json | wc -l)" -eq 5; \
+    cat /sbom/sbom.cdx.json
 COPY test/ffmpeg-check.sh /tmp/ffmpeg-check.sh
 # The check reads /out, which the runtime stage copies both binaries
 # from, once nothing more is written there, so what it passes is what
@@ -369,6 +388,7 @@ COPY --from=probe /out/divbast-lidarr /usr/local/bin/divbast-lidarr
 # On the base's PATH, for the plugins that look for them there
 COPY --from=ffmpeg /out/ffmpeg /out/ffprobe /usr/local/bin/
 COPY --from=ffmpeg /notices /usr/local/share/doc/ffmpeg
+COPY --from=ffmpeg /sbom/sbom.cdx.json /usr/local/share/divbast/sbom.cdx.json
 # The data directory, empty and uid 65532's, and not a VOLUME: a new named
 # volume mounted here takes its owner from it, so Lidarr can write to it.
 COPY --from=backend --chown=65532:65532 /out/config /config
@@ -394,7 +414,8 @@ LABEL org.opencontainers.image.source="https://github.com/divbast/lidarr-oci-ima
     org.opencontainers.image.url="https://github.com/divbast/lidarr-oci-image" \
     org.opencontainers.image.title="Lidarr" \
     org.opencontainers.image.version="${LIDARR_VERSION}" \
-    org.opencontainers.image.licenses="GPL-3.0-only"
+    org.opencontainers.image.licenses="GPL-3.0-only" \
+    io.github.divbast.scan.sboms="/usr/local/share/divbast/sbom.cdx.json"
 
 EXPOSE 8080
 # Exec form: the shell form would need /bin/sh, which the image lacks.

@@ -357,9 +357,14 @@ breaking change.
   libm, libz and the loader; its Go test, `test/ffmpeg`, runs it over
   fixtures and checks the Containerfile runs it where it must.
   `TestFFmpegTranscodes` encodes to and decodes back from MP3, Opus,
-  Vorbis and AAC. The scan cannot see a static FFmpeg, so the narrow,
-  hardened build and Renovate's FFmpeg pull requests are the mitigation.
-  Widening it is the owner's call
+  Vorbis and AAC. A static FFmpeg carries no package record, so the stage
+  writes an SBOM before the check, `/usr/local/share/divbast/sbom.cdx.json`,
+  which the `io.github.divbast.scan.sboms` label declares and divbast/ci's
+  scan (v4.30.0 or newer) reads: FFmpeg by its CPE at `FFMPEG_VERSION`,
+  and the four codec `-dev` packages, whose static archives are linked
+  in, by DHI package URL at the version dpkg reports, so it cannot go
+  stale. The narrow, hardened build and Renovate's FFmpeg pull requests
+  stay the first mitigation. Widening it is the owner's call
 - **fpcalc carries an FFmpeg of its own,** statically linked into
   upstream's NuGet pin of Chromaprint (libavcodec 63.1 at this pin), which
   the image neither narrows nor hardens and the scan cannot see. Lidarr
