@@ -156,12 +156,15 @@ under System, Backup; Lidarr restarts itself, in the same container, to
 apply it.
 
 **After restoring a backup, restart the container** (`podman restart
-lidarr`) before you change anything. Lidarr's own restart puts the
-restored database in place, but upstream leaves SQLite's connections open
-across that restart, so Lidarr can go on reading, and writing, the
-database the restore replaced: the restore looks undone, and whatever you
-change before a full restart is lost. A restart of the container opens
-the restored database whatever was left open.
+lidarr`) before you change anything, whether it is still running or has
+stopped. Lidarr's own restart puts the restored database in place, but
+upstream leaves SQLite's connections open across that restart, so Lidarr
+can go on reading, and writing, the database the restore replaced: the
+restore looks undone, and whatever you change before a full restart is
+lost. Should the restore fail partway, with `Failed to restore database`
+in its log, Lidarr tries it once more without its plugins, if they
+unload, or stops, with exit status 0 and the restore not yet applied. A
+restart of the container applies the restore whatever was left open.
 
 - This image serves on 8080, not Lidarr's usual 8686, and its
   `LIDARR__SERVER__PORT` wins over the old `config.xml`. Whatever reaches

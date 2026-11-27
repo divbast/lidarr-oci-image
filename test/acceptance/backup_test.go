@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"slices"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -143,13 +144,20 @@ func finished(ctx context.Context, s *harness.Serving, id int) (command, error) 
 // downloaded, the tag deleted, and the backup uploaded to
 // /api/v1/system/backup/restore/upload, which Lidarr stages in /tmp and
 // applies once it restarts. Restarted as the UI then restarts it, in the
-// one process, Lidarr must serve again, having put the restored database
-// in place. That restart does not clear SQLite's connection pool, which
-// upstream clears only on a full shutdown, so the new host can go on
-// reading the database it replaced, through a connection the old one left
-// open: on a slow runner the tag stayed gone. A restart of the container,
-// which the README tells users to make after a restore, opens the
-// restored file whatever the pool held, and the tag must be back then.
+// one process, Lidarr must say it is restoring the database. That restart
+// does not clear SQLite's connection pool, which upstream clears only on
+// a full shutdown, so the new host can go on reading the database it
+// replaced, through a connection the old one left open: on a slow runner
+// the tag stayed gone. A restore that fails partway does not stop Lidarr
+// at once, as it stops Sonarr with exit status 3: if its plugins unload,
+// Lidarr builds its host again without them, and that host runs the
+// staged restore again. If they do not unload, or the second try fails
+// too, Lidarr stops, with exit status 0, the restore still staged. Which
+// way it went is logged, never checked. The restore stays staged until it
+// is applied, so a restart of the container, which the README tells users
+// to make after a restore, applies it whatever the pool held, from a
+// container still running or one that has stopped. Lidarr must then serve
+// again, with the tag back.
 func TestRestoresBackup(t *testing.T) {
 	t.Parallel()
 	e, image := underTest(t)
@@ -197,21 +205,68 @@ func TestRestoresBackup(t *testing.T) {
 
 	resp, err = api(ctx, s, http.MethodPost, "/api/v1/system/restart", nil)
 	harness.Answers(t, "POST /api/v1/system/restart answers 200", http.StatusOK, resp, err)
-	err = servesAgain(ctx, s)
-	checks.True("Lidarr restarts and /ping answers 200 again within "+restartWithin.String(), err == nil, errText(err))
-	harness.LogContains(t, s.C, "Lidarr says it puts the restored database in place", restoringDatabase)
+	err = logged(ctx, s.C, restoringDatabase, restartWithin)
+	checks.True("Lidarr says it is restoring the database within "+restartWithin.String(), err == nil, errText(err))
 
-	if err := s.Restart(ctx); err != nil {
-		t.Fatalf("restarting the container after the restore: %v", err)
+	// Upstream's race: its in-process restart keeps the SQLite connection
+	// pool the old host left, so by now Lidarr may be serving the database
+	// the restore replaced, or, the restore having failed, be trying it
+	// again without plugins, or have stopped with exit status 0. The
+	// container restarts whatever state it is in, as the README tells users
+	// to: an on-failure restart policy would not restart one that exited 0
+	noteOutcome(t, s.C)
+	if err = s.Restart(ctx); err != nil {
+		t.Fatalf("restarting the container after the restore began: %v", err)
 	}
+	err = servesAgain(ctx, s)
+	checks.True("after a restart of the container, /ping answers 200 within "+restartWithin.String(), err == nil, errText(err))
 	if got := labels(t, s, "after the restore and a restart of the container"); got != nil {
 		checks.True("after the restore and a restart of the container, the tag is back", slices.Contains(got, "restored"), fmt.Sprintf("tags: %q", got))
 	}
 }
 
-// restoringDatabase is what Lidarr logs as the host a restart builds puts
-// the restored database in place of the old one.
+// restoringDatabase is what Lidarr logs as the host a restart builds
+// begins to put the restored database in place of the old one.
 const restoringDatabase = "DatabaseRestorationService: Restoring Database"
+
+// restoreFailed is what Lidarr logs when the restore fails partway, which
+// fails the host's start.
+const restoreFailed = "DatabaseRestorationService: Failed to restore database"
+
+// failedWithPlugins is what Lidarr logs when a host fails to start with
+// plugins. If its plugins then unload, Lidarr builds the host again
+// without them, and after a restore that failed, that host runs the
+// restore again.
+const failedWithPlugins = "Bootstrap: Error starting with plugins enabled"
+
+// noteOutcome logs, for the record and never as a check, how the
+// in-process restart has left c just before the test restarts it: its
+// state, with its exit status once it has stopped, whether its log says
+// the restore failed, and whether a host failed to start with plugins.
+// Plugins that do not unload, or a second failure in a row, end Lidarr
+// with exit status 0. CI's history then shows how often each way of
+// upstream's race happens, and when upstream's fix ends it. It runs as
+// soon as the restore has begun, so a failure, a retry or an exit that
+// comes after that look is not in its line.
+func noteOutcome(t *testing.T, c *harness.Container) {
+	t.Helper()
+	ctx := t.Context()
+	var state string
+	switch ins, err := c.Inspect(ctx); {
+	case err != nil:
+		state = "of a state the engine did not give: " + err.Error()
+	case ins.State.Running:
+		state = ins.State.Status
+	default:
+		state = fmt.Sprintf("%s, exit status %d", ins.State.Status, ins.State.ExitCode)
+	}
+	said := "its log could not be read"
+	if logs, err := c.Logs(ctx); err == nil {
+		said = fmt.Sprintf("%q logged: %t; %q logged: %t",
+			restoreFailed, strings.Contains(logs, restoreFailed), failedWithPlugins, strings.Contains(logs, failedWithPlugins))
+	}
+	t.Logf("before the restart of the container, the in-process restart left it %s; %s", state, said)
+}
 
 // backupNow has s back itself up, as a Backup command through the API,
 // and returns the backup's bytes as the UI downloads them, signed in, or
