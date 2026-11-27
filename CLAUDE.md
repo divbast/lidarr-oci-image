@@ -155,10 +155,25 @@ breaking change.
   between in-process restarts, so the new host can reuse a connection to
   the replaced, unlinked `lidarr.db` and read the old data. It never
   showed on a Mac and showed on GitHub's arm64 runners, under both
-  engines. `TestRestoresBackup` therefore restarts the container after the
-  UI's restart before it looks for the restored tag, and the README tells
-  users to do the same, before changing anything. Upstream's own fix would
-  be a `ClearAllPools` in its restart loop; this image does not patch it
+  engines. A restore that fails partway, as Sonarr's can when a closing
+  connection takes `-wal` away, does not stop Lidarr at once, as it stops
+  Sonarr with exit status 3: `RunHost` catches any failure to start a
+  host and logs `Error starting with plugins enabled`, and if its plugins
+  unload (`PluginLoader.UnloadPlugins`, which gives up after ten rounds
+  of garbage collection), Lidarr builds the host again without them,
+  which runs the still-staged restore again. If they do not unload, or
+  the second try fails too, Lidarr ends, with `Lidarr has shut down
+  completely` and exit status 0, the restore still staged (measured, two
+  failures in a row, with `lidarr.db-wal` a directory the restore cannot
+  delete). Lidarr's restore deletes the old files, allowing for one
+  already gone, where Sonarr's moves each aside after a check for it, so
+  Lidarr usually gets past a failed restore by itself. `TestRestoresBackup`
+  still restarts the container once Lidarr logs that it is restoring,
+  whether the container still runs or has stopped, logging which way the
+  in-process restart went, before it looks for the restored tag, and the
+  README tells users to do the same, before changing anything. Upstream's
+  own fix would be a `ClearAllPools` in its restart loop; this image does
+  not patch it
 - **No egress is needed, and some happens.** The contract suite proves the
   image serves and is healthy on a genuinely `--internal` network. The
   acceptance suite points Lidarr's own hosts at loopback and turns
