@@ -13,8 +13,8 @@
 # the commit and checks nothing more: the full commit fixes the content, and
 # the version beside it is Azure's record of that build, which Renovate
 # writes into both lines in one change.
-ARG LIDARR_VERSION=4.0.0.5236
-ARG LIDARR_COMMIT=beafd022d5c7023576f00c7b45756d5d539b7a36
+ARG LIDARR_VERSION=4.0.0.5247
+ARG LIDARR_COMMIT=723792986951fb35b8658a5a7804a5d6014aef1d
 # The watch for Lidarr's first stable v4 release, which no build reads:
 # Renovate writes it on the line below once GitHub has a v4 release that is
 # not a pre-release, and test/stable's TestNoV4StableYet then fails, so the
