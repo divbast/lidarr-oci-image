@@ -21,12 +21,6 @@ ARG LIDARR_COMMIT=723792986951fb35b8658a5a7804a5d6014aef1d
 # nightly line stops here until the image moves to stable: CLAUDE.md,
 # 'Moving to stable'. 0.0.0.0 stands for none.
 # LIDARR_STABLE_V4=0.0.0.0
-# FFmpeg, built from source for Lidarr's plugins: Renovate moves these two
-# in one PR, from FFmpeg's release tags, and its regex needs them adjacent
-# and in this order. The ffmpeg stage fetches the commit and asserts the
-# tag still names it.
-ARG FFMPEG_VERSION=n9.1
-ARG FFMPEG_COMMIT=74e4393595cf2b5857f0da925c4e0dd74ea306e5
 # The runtime: Docker Hardened Images' ASP.NET Core on Debian 13, with ICU,
 # OpenSSL and the .NET runtime the app runs on, no shell and no package
 # manager, and its nonroot user 65532. The app is built framework-dependent,
@@ -191,188 +185,51 @@ RUN CGO_ENABLED=0 GOFLAGS=-mod=readonly GOTOOLCHAIN=local \
     go build -trimpath -ldflags "-s -w -X main.version=${LIDARR_VERSION}" \
     -o /out/divbast-lidarr ./cmd/divbast-lidarr
 
-# ffmpeg and ffprobe, which Lidarr itself never runs and its plugins do:
-# Tubifarry, among others, transcodes downloads with them, and finds them
-# on PATH rather than fetching a build of its own into /config. The Go
-# -dev image, which the probe stage already pulls, has gcc, make, readelf,
-# git and apt, with Docker Hardened Images' own Debian repository beside
-# Debian's.
+# The check the carrier's binaries pass before they ship: they are copied
+# into this stage, which runs test/ffmpeg-check.sh over them as its last
+# step, and the runtime stage copies them from here, so what passes is what
+# ships. A new digest of the carrier is checked the same way. The check
+# reads each binary's dynamic section and its encoders, so it runs in the
+# Go -dev image the probe stage already pulls, which has readelf.
 FROM dhi.io/golang:1.27.4-debian13-dev@sha256:c5c02f15e0fd96999d48d70545b7c76b7080caebc9367680812d5244ac316bee AS ffmpeg
-ARG FFMPEG_VERSION
-ARG FFMPEG_COMMIT
-ARG TARGETARCH
-SHELL ["/bin/bash", "-euo", "pipefail", "-c"]
-# The codec libraries for MP3, Opus and Vorbis, which FFmpeg cannot encode
-# well alone: it has no MP3 encoder, and its own Opus and Vorbis encoders
-# are experimental. Each is pinned, one name=version a line, which
-# Renovate's manager reads, to a +dhi build, which only DHI's repository
-# has, so apt never falls back to Debian's. DHI deletes a superseded
-# build, so a pin can fail the build until Renovate's PR moves it; these
-# packages rarely change. Each library's .so link is removed, leaving its
-# static archive for the linker, so the codecs link into the binaries:
-# the runtime base carries none of them. glibc and zlib stay shared, from
-# the base, where the scan and DHI's VEX cover them.
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends \
-        libmp3lame-dev=3.100-6+deb13u0+dhi0 \
-        libogg-dev=1.3.5-3+deb13u0+dhi0 \
-        libopus-dev=1.5.2-2+deb13u0+dhi0 \
-        libvorbis-dev=1.3.7-3+deb13u0+dhi0 \
-        pkgconf=1.8.1-4+deb13u0+dhi1 \
-        zlib1g-dev=1:1.3.dfsg+really1.3.1-1+deb13u1+dhi0 \
-    && rm -rf /var/lib/apt/lists/* \
-    && lib=/usr/lib/$(gcc -dumpmachine) \
-    && for name in mp3lame ogg opus vorbis vorbisenc; do \
-        test -f "${lib}/lib${name}.a"; \
-        rm "${lib}/lib${name}.so"; \
-    done
-# Fetched by commit, which git checks against its hash, and the tag asked
-# for separately, peeled, since FFmpeg's are annotated, so a tag moved
-# upstream fails the build. FFmpeg signs its tags; the image does not
-# check the signature, since a new key would be a pin a person moves, and
-# the commit pin already fixes the content. .git goes once checked, so
-# FFmpeg's version script reads the version from RELEASE instead of
-# naming the shallow clone's commit.
-RUN retry() { \
-        for delay in 10 30 90; do "$@" && return 0; sleep "${delay}"; done; \
-        "$@"; \
-    }; \
-    git init -q /src; \
-    git -C /src remote add origin https://github.com/FFmpeg/FFmpeg.git; \
-    retry git -C /src fetch -q --depth 1 origin "${FFMPEG_COMMIT}"; \
-    git -C /src checkout -q --detach FETCH_HEAD; \
-    head=$(git -C /src rev-parse HEAD); \
-    test "${head}" = "${FFMPEG_COMMIT}"; \
-    retry git -C /src ls-remote origin \
-        "refs/tags/${FFMPEG_VERSION}" "refs/tags/${FFMPEG_VERSION}^{}" >/tmp/tag; \
-    tagged=$(awk -v tag="refs/tags/${FFMPEG_VERSION}" \
-        '$2 == tag "^{}" { peeled = $1 } $2 == tag { plain = $1 } END { print (peeled != "" ? peeled : plain) }' /tmp/tag); \
-    if [[ "${tagged}" != "${FFMPEG_COMMIT}" ]]; then \
-        echo "tag ${FFMPEG_VERSION} names '${tagged}', the Containerfile pins ${FFMPEG_COMMIT}" >&2; \
-        exit 1; \
-    fi; \
-    rm -rf /src/.git
-WORKDIR /src
-# Static, everything off, then only the formats Lidarr's plugins are likely
-# to meet: what downloads from YouTube, Deezer, Tidal, Qobuz and Soulseek
-# come as, and the cover art beside them. Decoders and demuxers are where
-# FFmpeg's vulnerabilities are found, and the scan cannot see what a static
-# build links in, so each format left out is one a crafted download cannot
-# reach. Decoders: MPEG audio layers 1 to 3, AAC and LATM, Opus, Vorbis,
-# WMA 1, 2 and Pro, AC-3, E-AC-3 and DTS; FLAC, ALAC, WavPack, Monkey's
-# Audio, TrueHD, MLP and WMA Lossless; every PCM FFmpeg decodes natively,
-# never AudioToolbox's, which only macOS has; and the cover art formats,
-# JPEG, PNG, BMP, GIF, WebP and TIFF, WebP's decoder bringing in VP8's,
-# since a lossy WebP image is a VP8 frame. Demuxers: the containers those
-# come in, MP3, raw AAC and LATM, FLAC, Ogg, MP4, Matroska and WebM, WAV,
-# W64, AIFF, CAF, ASF, Monkey's Audio, WavPack, raw AC-3, E-AC-3, DTS,
-# TrueHD and MLP, and the image demuxers for the art. Parsers: those of the
-# audio and art codecs above that have one. Left out: ADPCM, DSD, Musepack,
-# RealAudio, ATRAC, Speex, WMA Voice, telephony and game audio, and all
-# video but WebP's VP8, none of which a plugin downloads music as, so a
-# file in any of them is refused rather than decoded. Encoders: LAME's MP3,
-# libopus and libvorbis, and FFmpeg's own AAC, FLAC and ALAC, which the
-# plugins transcode to, and MJPEG, to re-encode cover art. Muxers: only the
-# files those encoders write, MP3, ADTS, M4A (ipod), MP4, Ogg, Opus, FLAC,
-# and image2 for the art; MP4's and M4A's are FFmpeg's MOV muxer under
-# other names, and bring it in. None for WAV, AIFF, AC-3, E-AC-3, ASF,
-# Matroska or WebM: nothing here encodes PCM, AC-3 or WMA, and the plugins
-# write none of them. One bitstream filter, aac_adtstoasc, which MP4 and
-# M4A need for AAC copied from an ADTS stream; the MOV muxer selects it
-# too, with VP9's superframe filter, which no audio needs. The two filters
-# the plugins ask for. Every list names each component, since a glob such
-# as pcm_* would take AudioToolbox's too. No network, no devices, nothing
-# found by autodetection, so nothing links but what is named; no
-# --enable-gpl, so the build is LGPL-2.1-or-later. nasm is not in DHI's
-# repository, so amd64 builds without FFmpeg's hand-written x86 assembly;
-# arm64's needs none. --toolchain=hardened is FFmpeg's own set of exploit
-# mitigations, which Debian's build flags would otherwise give and a plain
-# configure never reads: FORTIFY_SOURCE, a stack protector on every
-# function, and position-independent binaries bound at load, full RELRO;
-# the check below holds the last two. A component configure cannot build,
-# one a new FFmpeg renamed, dropped or gated, it leaves out with no more
-# than a warning, and the format would vanish without a word: any warning
-# fails the build here, naming it. Each component goes to configure as an
-# option of its own, since configure warns of a name it does not know only
-# when nothing else in its list matches: one name in a list of many would
-# be dropped with no warning at all.
-RUN case "${TARGETARCH}" in \
-        amd64) asm=--disable-x86asm ;; \
-        arm64) asm= ;; \
-        *) echo "no FFmpeg build for ${TARGETARCH}" >&2; exit 1 ;; \
-    esac; \
-    lossy=mp1,mp1float,mp2,mp2float,mp3,mp3float,aac,aac_fixed,aac_latm,opus,vorbis,wmav1,wmav2,wmapro,ac3,ac3_fixed,eac3,dca; \
-    lossless=flac,alac,wavpack,ape,truehd,mlp,wmalossless; \
-    pcm=pcm_alaw,pcm_bluray,pcm_dvd,pcm_f16le,pcm_f24le,pcm_f32be,pcm_f32le,pcm_f64be,pcm_f64le,pcm_lxf,pcm_mulaw,pcm_s16be,pcm_s16be_planar,pcm_s16le,pcm_s16le_planar,pcm_s24be,pcm_s24daud,pcm_s24le; \
-    pcm+=,pcm_s24le_planar,pcm_s32be,pcm_s32le,pcm_s32le_planar,pcm_s64be,pcm_s64le,pcm_s8,pcm_s8_planar,pcm_sga,pcm_u16be,pcm_u16le,pcm_u24be,pcm_u24le,pcm_u32be,pcm_u32le,pcm_u8,pcm_vidc; \
-    art=mjpeg,png,bmp,gif,webp,tiff; \
-    demuxers=mp3,aac,loas,flac,ogg,mov,matroska,wav,w64,aiff,caf,asf,ape,wv,ac3,eac3,dts,truehd,mlp; \
-    demuxers+=,image2,image2pipe,image_jpeg_pipe,image_png_pipe,image_bmp_pipe,image_gif_pipe,image_webp_pipe,image_tiff_pipe; \
-    opts=(); \
-    enable() { \
-        local names name; \
-        IFS=, read -ra names <<<"$2"; \
-        for name in "${names[@]}"; do opts+=("--enable-$1=${name}"); done; \
-    }; \
-    enable protocol file,pipe; \
-    enable decoder "${lossy},${lossless},${pcm},${art}"; \
-    enable encoder libmp3lame,aac,libopus,libvorbis,flac,alac,mjpeg; \
-    enable demuxer "${demuxers}"; \
-    enable parser aac,aac_latm,ac3,dca,flac,mlp,mpegaudio,opus,vorbis,mjpeg,png,bmp,gif,webp; \
-    enable bsf aac_adtstoasc; \
-    enable muxer mp3,adts,ipod,mp4,ogg,opus,flac,image2; \
-    enable filter aresample,scale; \
-    ./configure \
-        --disable-everything --disable-autodetect --disable-network --disable-avdevice \
-        --disable-programs --enable-ffmpeg --enable-ffprobe --disable-doc --disable-debug \
-        --enable-static --disable-shared --pkg-config-flags=--static \
-        --enable-zlib --enable-libmp3lame --enable-libopus --enable-libvorbis \
-        "${opts[@]}" \
-        --toolchain=hardened \
-        ${asm:+"${asm}"} \
-        | tee /tmp/configure.log; \
-    if grep -n '^WARNING' /tmp/configure.log >&2; then \
-        echo "ERROR: configure warned, above: a component it names is not built. Fix the Containerfile's lists for this FFmpeg." >&2; \
-        exit 1; \
-    fi
-# make writes ffmpeg and ffprobe stripped, beside the _g builds it keeps
-# symbols in. The notices of what they carry go beside them in the image:
-# FFmpeg's licence, and the copyright files of the codec libraries linked
-# in, LAME's under the LGPL, and Opus's, Vorbis's and Ogg's under the BSD
-# licence, which asks that they ship with the binary.
-RUN make -j"$(nproc)" \
-    && install -d /out /notices \
-    && install -m 0755 -t /out ffmpeg ffprobe \
-    && install -m 0644 -t /notices LICENSE.md COPYING.LGPLv2.1 \
-    && for pkg in libmp3lame0 libogg0 libopus0 libvorbis0a libvorbisenc2; do \
-        install -m 0644 "/usr/share/doc/${pkg}/copyright" "/notices/${pkg}.copyright"; \
-    done
-# The SBOM of what no image scan can see: ffmpeg and ffprobe, built
-# here, by FFmpeg's CPE at the release FFMPEG_VERSION names, and the four
-# codec libraries linked into them, each by the package URL of the DHI
-# build the stage installed, at the version dpkg reports, so it cannot go
-# stale. ci's divbast-scan reads it through the label below, and judges
-# each as it judges every package.
-RUN ffmpeg_version=${FFMPEG_VERSION#n}; \
-    components=$(printf '{"type":"application","name":"ffmpeg","version":"%s","cpe":"cpe:2.3:a:ffmpeg:ffmpeg:%s:*:*:*:*:*:*:*","licenses":[{"license":{"id":"LGPL-2.1-or-later"}}]}' \
-        "${ffmpeg_version}" "${ffmpeg_version}"); \
-    while read -r pkg version source; do \
-        encoded=${version//+/%2B}; \
-        encoded=${encoded//:/%3A}; \
-        components+=$(printf ',{"type":"library","name":"%s","version":"%s","purl":"pkg:deb/dhi/%s@%s?arch=%s&distro=dhi-13&upstream=%s"}' \
-            "${pkg}" "${version}" "${pkg}" "${encoded}" "${TARGETARCH}" "${source}"); \
-    done < <(dpkg-query -W -f '${Package} ${Version} ${source:Package}\n' libmp3lame-dev libogg-dev libopus-dev libvorbis-dev); \
-    install -d /sbom; \
-    printf '{"bomFormat":"CycloneDX","specVersion":"1.6","version":1,"components":[%s]}\n' "${components}" >/sbom/sbom.cdx.json; \
-    test "$(grep -o '"name":' /sbom/sbom.cdx.json | wc -l)" -eq 5; \
-    cat /sbom/sbom.cdx.json
+COPY --from=ghcr.io/divbast/ffmpeg:lidarr@sha256:6293ad9d0639a4d724b7a7d84ea2b49b632bbdd6691069fbc4638d87cf405238 --chmod=0755 /bin/ffmpeg /bin/ffprobe /out/
 COPY test/ffmpeg-check.sh /tmp/ffmpeg-check.sh
-# The check reads /out, which the runtime stage copies both binaries
-# from, once nothing more is written there, so what it passes is what
-# ships: each answers as itself, is position-independent and bound at
-# load, ffmpeg has the three library encoders, and neither needs a shared
-# library the runtime base lacks.
+# ffmpeg answers as itself, is position-independent and bound at load, has
+# the three library encoders, and neither binary needs a shared library the
+# runtime base lacks.
 RUN /tmp/ffmpeg-check.sh /out
+
+# The SBOM of what no image scan can see: ffmpeg and ffprobe, and the four
+# codec libraries linked into them. The carrier below describes them in its
+# own records, and this takes each component as the carrier gave it, with
+# its version, licence, CPE or package URL, and adds only where the binary
+# sits in this image. It fails the build if a component names nothing the
+# scan can match it by. ci's divbast-scan reads the result through the label
+# below. node is the one scripting tool among the stages' images already
+# pinned here.
+FROM dhi.io/node:26.13.1-debian13-dev@sha256:d4d70223ec5fa176c9f19eb98f8bdd14035b166c2dbfb75e4cc71ea44234f911 AS sbom
+COPY --from=ghcr.io/divbast/ffmpeg:lidarr@sha256:6293ad9d0639a4d724b7a7d84ea2b49b632bbdd6691069fbc4638d87cf405238 /records/sbom.cdx.json /tmp/sbom/ffmpeg.cdx.json
+SHELL ["/bin/bash", "-euo", "pipefail", "-c"]
+RUN install -d /out \
+    && node - >/out/sbom.cdx.json <<'EOF'
+const carrier = JSON.parse(require("fs").readFileSync("/tmp/sbom/ffmpeg.cdx.json", "utf8"));
+const components = carrier.components;
+const names = components.map((c) => c.name).sort().join(",");
+const want = "ffmpeg,libmp3lame-dev,libogg-dev,libopus-dev,libvorbis-dev";
+if (names !== want) {
+  console.error(`the carrier's SBOM must hold exactly ${want}, not ${names}`);
+  process.exit(1);
+}
+for (const c of components) {
+  if (!(c.cpe || c.purl)) {
+    console.error(`the carrier's ${c.name} component has neither a cpe nor a purl, so the scan could not match it`);
+    process.exit(1);
+  }
+}
+const ffmpeg = components.find((c) => c.name === "ffmpeg");
+ffmpeg.properties = [...(ffmpeg.properties ?? []), { name: "path", value: "/usr/local/bin/ffmpeg" }];
+console.log(JSON.stringify({ bomFormat: "CycloneDX", specVersion: "1.6", version: 1, components }));
+EOF
 
 FROM ${RUNTIME_IMAGE}
 ARG LIDARR_VERSION
@@ -385,10 +242,18 @@ COPY --from=backend /out/package_info /app/package_info
 # copies it into the tarball's Lidarr/ folder, which is this /app/bin
 COPY --from=fetch /src/LICENSE.md /app/bin/LICENSE.md
 COPY --from=probe /out/divbast-lidarr /usr/local/bin/divbast-lidarr
-# On the base's PATH, for the plugins that look for them there
+# ffmpeg and ffprobe, which Lidarr itself never runs and its plugins do:
+# Tubifarry, among others, transcodes downloads with them, and finds them
+# on PATH rather than fetching a build of its own into /config. They are
+# built once in divbast/native-tools from FFmpeg's source, narrow and
+# hardened, with the static codec libraries, and attested there: ci's
+# divbast-verify-images checks the attestation of this digest before the
+# image builds, and Renovate moves the digest. FFmpeg's licence and the
+# copyright files of the libraries linked in ship beside them.
 COPY --from=ffmpeg /out/ffmpeg /out/ffprobe /usr/local/bin/
-COPY --from=ffmpeg /notices /usr/local/share/doc/ffmpeg
-COPY --from=ffmpeg /sbom/sbom.cdx.json /usr/local/share/divbast/sbom.cdx.json
+COPY --from=ghcr.io/divbast/ffmpeg:lidarr@sha256:6293ad9d0639a4d724b7a7d84ea2b49b632bbdd6691069fbc4638d87cf405238 /doc/ffmpeg/ /usr/local/share/doc/ffmpeg/
+COPY --from=ghcr.io/divbast/ffmpeg:lidarr@sha256:6293ad9d0639a4d724b7a7d84ea2b49b632bbdd6691069fbc4638d87cf405238 /doc/mp3lame/libmp3lame0.copyright /doc/ogg/libogg0.copyright /doc/opus/libopus0.copyright /doc/vorbis/libvorbis0a.copyright /doc/vorbis/libvorbisenc2.copyright /usr/local/share/doc/ffmpeg/
+COPY --from=sbom /out/sbom.cdx.json /usr/local/share/divbast/sbom.cdx.json
 # The data directory, empty and uid 65532's, and not a VOLUME: a new named
 # volume mounted here takes its owner from it, so Lidarr can write to it.
 COPY --from=backend --chown=65532:65532 /out/config /config

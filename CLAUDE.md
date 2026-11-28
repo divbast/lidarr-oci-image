@@ -19,9 +19,9 @@ and `latest`, from `build.yml`'s daily slot and its manual run on `main`.
 What makes the image this app's lives here: the Containerfile, the health
 probe (`cmd/divbast-lidarr`, `internal/probe`), the backend stage's two
 checks (`test/global-json.sh`, `test/runtime-major.sh`), the ffmpeg
-stage's check (`test/ffmpeg-check.sh`), the watch for v4 stable
-(`test/stable`), `renovate.json`'s managers and datasource, and the
-acceptance tests. The pipeline around it is shared, and reaches this
+stage's check of the carrier's binaries (`test/ffmpeg-check.sh`), the
+watch for v4 stable (`test/stable`), `renovate.json`'s managers and
+datasource, and the acceptance tests. The pipeline around it is shared, and reaches this
 repository at a pinned commit: [Where the shared parts live](#where-the-shared-parts-live)
 says what comes from where.
 
@@ -221,8 +221,10 @@ breaking change.
   `renovate.yml`, as the org's `divbast-renovate` App, managed from
   `divbast/infra`. It moves the DHI images by digest, with the .NET SDK and
   runtime grouped in one PR and .NET majors held for Dashboard approval
-  (renovate-config's `:app`), Lidarr's nightlies as they come, FFmpeg's
-  releases, and the DHI packages the ffmpeg stage installs. After a merge
+  (renovate-config's `:app`), Lidarr's nightlies as they come, and the
+  digest of the ffmpeg carrier, `ghcr.io/divbast/ffmpeg:lidarr`, which
+  divbast/native-tools publishes, with no release-age hold, as divbast's
+  own packages have none. After a merge
   it rebases every open PR left behind main, since GitHub re-runs no
   checks when a base moves and a green check on a stale base proves
   nothing. **It merges its own PRs** once every check passes, with a
@@ -249,7 +251,9 @@ breaking change.
   signature on each DHI image, the runtime and **every stage's image**:
   the fetch and frontend stages' `dhi.io/node` `-dev`, the backend's
   `dhi.io/dotnet` SDK and the probe and ffmpeg stages' `dhi.io/golang`
-  `-dev`. Every stage is DHI, so one publisher signs every builder. A local
+  `-dev`. Every stage is DHI, so one publisher signs every builder. The
+  ffmpeg carrier is not DHI: the same tool checks its attestation, and its
+  digest is the one the ffmpeg and sbom stages copy from. A local
   `just build` does not verify, and needs `docker login dhi.io`; `just
   ci-tools && .ci/bin/divbast-verify-images` verifies, with cosign from
   `mise.toml`
@@ -339,49 +343,40 @@ breaking change.
   patches, each time upstream rewrites develop
 - **Every stage is DHI.** The fetch runs in the Node `-dev` image, which
   ships git, the probe and ffmpeg stages in the Go `-dev` image, and the
-  frontend in the same Node image, with yarn 1 and `--frozen-lockfile`.
-  The ffmpeg stage installs its six packages from DHI's own Debian
-  repository, each pinned to a `+dhi` build, which Debian's repository
-  beside it does not have, so apt never falls back to Debian's. Never add a
-  stage from another publisher, and never set
+  frontend and the sbom stage in the same Node image, with yarn 1 and
+  `--frozen-lockfile`. The one image not DHI's is the ffmpeg carrier,
+  which the stages only copy from. Never add a stage from another
+  publisher, and never set
   `DOTNET_SYSTEM_GLOBALIZATION_INVARIANT`: it breaks name matching and
   release parsing
-- **ffmpeg is built narrow, and checked.** FFmpeg's source at the tag
-  `FFMPEG_VERSION` names, whose commit `FFMPEG_COMMIT` pins and the stage
-  asserts the tag still names; configured from `--disable-everything` with
-  only what the owner chose for Lidarr's plugins: the audio formats a
-  download brings (MP3, AAC, Opus, Vorbis, WMA, AC-3, E-AC-3, DTS, FLAC,
-  ALAC, WavPack, Monkey's Audio, TrueHD, WMA Lossless and PCM), cover art,
-  and the encoders, containers and filters to write MP3, AAC, Opus, Vorbis,
-  FLAC, ALAC and JPEG art; no network, no devices, nothing autodetected, no
-  `--enable-gpl`; and `--toolchain=hardened`, FFmpeg's own FORTIFY_SOURCE,
-  stack protection and position-independent binaries bound at load, which
-  a plain configure would otherwise leave out. Every list is explicit,
-  never a glob, which would take the platform builds configure then warns
-  about, and **any configure warning fails the stage**: configure drops a
-  component it cannot build, one a new FFmpeg renamed, removed or gated,
-  with no more than a warning, and FFmpeg's pull requests merge
-  themselves, so without the guard a promised format could vanish. LAME,
-  Opus and Vorbis link in statically, their `.so` links removed in the
-  stage, since the runtime base carries none of them; glibc, libm and zlib
-  stay shared. Their notices, FFmpeg's licence and the Debian copyright
-  files of LAME, Opus, Vorbis and Ogg (whose BSD licence asks for it),
-  ship in `/usr/local/share/doc/ffmpeg`, which `TestFFmpegNotices` holds;
-  the README has no licence section. `test/ffmpeg-check.sh`, the stage's
-  last step, holds that each binary answers as itself, is
-  position-independent and bound at load, that ffmpeg has the three
-  library encoders, and that neither needs a shared library but libc,
-  libm, libz and the loader; its Go test, `test/ffmpeg`, runs it over
-  fixtures and checks the Containerfile runs it where it must.
+- **ffmpeg is not built here.** FFmpeg is built once, narrow and hardened,
+  in divbast/native-tools, with the static LAME, Ogg, Opus and Vorbis
+  libraries, and attested there: see that repository's README, "Using a
+  carrier". A change to which formats it reads or writes, to its flags or
+  to its codec libraries is a change there, and widening it is the owner's
+  call. The `ffmpeg` stage copies `/bin/ffmpeg` and `/bin/ffprobe` from
+  the `ghcr.io/divbast/ffmpeg:lidarr` carrier, by digest, and runs
+  `test/ffmpeg-check.sh` over them as its last step: each answers as
+  itself, is position-independent and bound at load, ffmpeg has the three
+  library encoders, and neither needs a shared library but libc, libm,
+  libz and the loader. The final stage copies the two binaries from that
+  stage, so what passed is what ships, and a new carrier digest passes the
+  same check before it merges. `test/ffmpeg` runs the script over fixtures
+  and checks the Containerfile wires it that way: the carrier's binaries
+  copied in, the check last, the final stage copying from the stage.
+  `divbast-verify-images` checks the digest's attestation. FFmpeg's licence
+  and the copyright files of the libraries linked in come from the
+  carrier's `/doc` into `/usr/local/share/doc/ffmpeg`, which
+  `TestFFmpegNotices` holds; the README has no licence section.
   `TestFFmpegTranscodes` encodes to and decodes back from MP3, Opus,
-  Vorbis and AAC. A static FFmpeg carries no package record, so the stage
-  writes an SBOM before the check, `/usr/local/share/divbast/sbom.cdx.json`,
-  which the `io.github.divbast.scan.sboms` label declares and divbast/ci's
-  scan (v4.30.0 or newer) reads: FFmpeg by its CPE at `FFMPEG_VERSION`,
-  and the four codec `-dev` packages, whose static archives are linked
-  in, by DHI package URL at the version dpkg reports, so it cannot go
-  stale. The narrow, hardened build and Renovate's FFmpeg pull requests
-  stay the first mitigation. Widening it is the owner's call
+  Vorbis and AAC. A static FFmpeg carries no package record, so the
+  `sbom` stage takes the carrier's `/records/sbom.cdx.json` as written,
+  FFmpeg by its CPE and the four codec `-dev` packages by DHI package URL,
+  adds only the path of ffmpeg, and fails if a component has neither a
+  CPE nor a package URL or the five names change. The result is
+  `/usr/local/share/divbast/sbom.cdx.json`, which the
+  `io.github.divbast.scan.sboms` label declares and divbast/ci's scan
+  (v4.30.0 or newer) reads
 - **fpcalc carries an FFmpeg of its own,** statically linked into
   upstream's NuGet pin of Chromaprint (libavcodec 63.1 at this pin), which
   the image neither narrows nor hardens and the scan cannot see. Lidarr
@@ -392,8 +387,8 @@ breaking change.
   import nothing outside the standard library, since the build context
   leaves `.ci/` out, and divbast/ci's `probekit` would put ci code in the
   image
-- **`LIDARR_VERSION` and `LIDARR_COMMIT` stay adjacent, in that order,
-  and so do `FFMPEG_VERSION` and `FFMPEG_COMMIT`.** `renovate.json`'s
+- **`LIDARR_VERSION` and `LIDARR_COMMIT` stay adjacent, in that order.**
+  `renovate.json`'s
   nightly manager moves the first two in one PR from the custom datasource
   `lidarr-nightly`: Azure DevOps' public build list, CI builds of
   `refs/heads/develop` that succeeded, never a pull request's build, whose
@@ -401,10 +396,9 @@ breaking change.
   since JSONata collapses a one-element list. If upstream ever moves its
   builds off Azure, the list stops growing and nothing fails: the image
   stays on its last nightly with no red check, which the README says.
-  The FFmpeg manager reads FFmpeg's tags, versioned so a `-dev` tag never
-  matches, with the commit a tag names as the digest. The libraries'
-  manager reads the six ` name=version \` lines ending `+dhiN` with the
-  `deb` datasource on DHI's index
+  The carrier's digest needs no manager here: Renovate's dockerfile
+  manager reads the `COPY --from=ghcr.io/divbast/ffmpeg:lidarr@sha256:…`
+  lines and the `ffmpeg` and `sbom` stages' copies hold the one digest
 - **The stable watch stays, until the move to stable.** The
   Containerfile's `# LIDARR_STABLE_V4=0.0.0.0` line is `renovate.json`'s
   watch manager's: Renovate writes Lidarr's first stable v4 release there,
@@ -483,8 +477,7 @@ step needs the user's go-ahead:
      watch's manager and its rule; drop `Lidarr v4 stable` from the group
      rule's `matchDepNames`, and its `separateMajorMinor` and the
      description that explains them, keeping its `lidarr` label and
-     `lidarr:` prefix; say so in the descriptions; FFmpeg's and the
-     libraries' managers stay;
+     `lidarr:` prefix; say so in the descriptions;
    - the Containerfile: `LIDARR_VERSION` and `LIDARR_COMMIT` to the release
      picked and the commit its tag names; the fetch stage asserts the
      release's tag still names the commit, as prowlarr-oci-image's does;
