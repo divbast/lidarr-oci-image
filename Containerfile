@@ -32,7 +32,7 @@ ARG FFMPEG_COMMIT=74e4393595cf2b5857f0da925c4e0dd74ea306e5
 # manager, and its nonroot user 65532. The app is built framework-dependent,
 # so a rebuild of this image patches the runtime. CI verifies its signature
 # by Docker before anything is built, as it does every stage's image below.
-ARG RUNTIME_IMAGE=dhi.io/aspnetcore:10.0.15-debian13@sha256:ae9e6b90e72d386ed60d562f169305f5323c6e079dee72bd30980b086069bc8c
+ARG RUNTIME_IMAGE=dhi.io/aspnetcore:10.0.15-debian13@sha256:42d16f3607c75121f0b2316c94eb8dbaba3a7d63d87b6a3ca7246d7264eaac17
 
 # The same image as the frontend's, which ships git and CA certificates.
 FROM dhi.io/node:26.13.1-debian13-dev@sha256:d4d70223ec5fa176c9f19eb98f8bdd14035b166c2dbfb75e4cc71ea44234f911 AS fetch
