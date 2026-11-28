@@ -45,8 +45,14 @@ build until Docker's signature on each is verified:
   moved.
 - `probe` builds the health probe, a static Go binary on the standard
   library alone.
-- `ffmpeg` builds ffmpeg and ffprobe from FFmpeg's source at a release
-  tag, for Lidarr's plugins: [ffmpeg and ffprobe](#ffmpeg-and-ffprobe).
+- `ffmpeg` holds the ffmpeg and ffprobe that Lidarr's plugins use, copied
+  from the `ghcr.io/divbast/ffmpeg` carrier of
+  [divbast/native-tools](https://github.com/divbast/native-tools), by
+  digest, and checks them before they ship: [ffmpeg and
+  ffprobe](#ffmpeg-and-ffprobe). ci verifies that digest's attestation
+  before the image builds.
+- `sbom` writes the SBOM the scan reads for ffmpeg and ffprobe, from the
+  carrier's own records, adding only a path.
 
 Lidarr is never patched. The one change the build makes to an upstream
 file is to `global.json`, in the backend stage, so that any later .NET SDK
@@ -323,8 +329,8 @@ startup makes Lidarr start without plugins and raise a health error.
 
 Lidarr itself never runs ffmpeg; its plugins do, to transcode what they
 download. The image carries `ffmpeg` and `ffprobe` in `/usr/local/bin`,
-built from FFmpeg's source at the release the Containerfile's
-`FFMPEG_VERSION` names, for the formats plugins meet and nothing else:
+built once from FFmpeg's source in divbast/native-tools, for the formats
+plugins meet and nothing else:
 
 - **Read:** MP3, AAC, Opus, Vorbis, WMA (v1, v2, Pro), AC-3, E-AC-3 and
   DTS; FLAC, ALAC, WavPack, Monkey's Audio, TrueHD and WMA Lossless;
@@ -344,10 +350,11 @@ Vorbis in about half a second, and AAC in about a second.
 **The scan reads them from an SBOM.** A static build carries no package
 record, so the image names what went into both binaries in
 `/usr/local/share/divbast/sbom.cdx.json`: FFmpeg at its release, and DHI's
-LAME, Ogg, Opus and Vorbis packages at the versions the build installed.
-The image's `io.github.divbast.scan.sboms` label points the scan there,
-and the scan judges each as it judges every package; Renovate's FFmpeg
-pull requests move the pin. The build is narrow and hardened as well:
+LAME, Ogg, Opus and Vorbis packages at the versions the build installed,
+as the carrier's own records give them, with ffmpeg's path added. The
+image's `io.github.divbast.scan.sboms` label points the scan there, and
+the scan judges each as it judges every package; Renovate's pull requests
+move the carrier's digest. The build is narrow and hardened as well:
 decoders and demuxers are where most of FFmpeg's security fixes land,
 this one has only the few above, and it is built with FFmpeg's hardened
 toolchain (`--toolchain=hardened`: FORTIFY_SOURCE, stack protection,
@@ -511,9 +518,8 @@ the attested index.
 
 Every input the Containerfile names is pinned: the DHI runtime, and the
 DHI Node, .NET SDK and Go images the stages build on, by digest; Lidarr's
-version and commit, together in two adjacent `ARG`s; FFmpeg's release and
-commit, likewise; and the six DHI packages the ffmpeg stage installs, by
-exact version. The probe is the standard library alone, so `go.mod`
+version and commit, together in two adjacent `ARG`s; and the ffmpeg carrier, by
+digest. The probe is the standard library alone, so `go.mod`
 requires nothing but divbast/ci's harness for its tests.
 
 A pin only moves through a pull request, and
@@ -532,12 +538,9 @@ pull requests Renovate opens here are:
   `LIDARR_STABLE_V4` line, in the same pull request as the nightly pins,
   which a check then holds red, and which never merges itself:
   [The nightly line](#the-nightly-line).
-- A new FFmpeg release moves `FFMPEG_VERSION` and `FFMPEG_COMMIT`
-  together, from FFmpeg's release tags, never its development ones; the
-  build fails if the tag ever names another commit.
-- A new DHI build of LAME, Opus, Vorbis, Ogg, pkgconf or zlib moves their
-  pins together, from DHI's own Debian repository. DHI deletes a
-  superseded build, so until that pull request merges, the build is red.
+- Each new digest of the ffmpeg carrier, `ghcr.io/divbast/ffmpeg:lidarr`,
+  which divbast/native-tools publishes with a new FFmpeg or new codec
+  libraries. The ffmpeg stage checks the new binaries before they ship.
 - A new DHI image arrives as a pull request that moves its digest, and CI
   verifies Docker's signature before it builds. The .NET SDK and the
   ASP.NET Core runtime move together in one pull request, and a new .NET

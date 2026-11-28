@@ -453,8 +453,9 @@ func TestUsage(t *testing.T) {
 }
 
 // TestContainerfileRunsIt fails unless the Containerfile runs the check
-// where it must: in the stage that builds ffmpeg and ffprobe, after make,
-// as its last step, on the folder the runtime stage copies both from.
+// where it must: in the stage that copies ffmpeg and ffprobe in from the
+// carrier, after they are there, as its last step, on the folder the
+// runtime stage copies both from.
 func TestContainerfileRunsIt(t *testing.T) {
 	t.Parallel()
 
@@ -472,14 +473,31 @@ func TestContainerfileRunsIt(t *testing.T) {
 	}
 }
 
+// TestCarrierDigestsAgree fails unless every copy of the carrier in the
+// Containerfile names one digest, since the stages must copy one image.
+func TestCarrierDigestsAgree(t *testing.T) {
+	t.Parallel()
+
+	data, err := os.ReadFile(filepath.Join("..", "..", "Containerfile"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := regexp.MustCompile(regexp.QuoteMeta(carrierImage)+`[0-9a-f]{64}`).FindAllString(string(data), -1)
+	if len(found) == 0 {
+		t.Fatal("the Containerfile names no carrier digest")
+	}
+	for _, d := range found {
+		if d != found[0] {
+			t.Errorf("carrier digests differ: %s and %s", found[0], d)
+		}
+	}
+}
+
 // wired is a Containerfile cut to what the wiring check reads, wired as
 // it must be.
 const wired = `# syntax and comments are skipped
 FROM dhi.io/golang:1.27.4-debian13-dev AS ffmpeg
-RUN ./configure --disable-everything \\
-    --enable-libmp3lame
-RUN make -j"$(nproc)" \\
-    && install -m 0755 -t /out ffmpeg ffprobe
+COPY --from=ghcr.io/divbast/ffmpeg:lidarr@sha256:0123 --chmod=0755 /bin/ffmpeg /bin/ffprobe /out/
 COPY test/ffmpeg-check.sh /tmp/ffmpeg-check.sh
 # the check reads what ships
 RUN /tmp/ffmpeg-check.sh /out
@@ -497,6 +515,7 @@ func TestWiringProblems(t *testing.T) {
 
 	const (
 		check   = "RUN /tmp/ffmpeg-check.sh /out\n"
+		carrier = "COPY --from=ghcr.io/divbast/ffmpeg:lidarr@sha256:0123 --chmod=0755 /bin/ffmpeg /bin/ffprobe /out/\n"
 		shipped = "COPY --from=ffmpeg /out/ffmpeg /out/ffprobe /usr/local/bin/\n"
 		notCopy = "the runtime stage does not copy /out/ffmpeg and /out/ffprobe"
 	)
@@ -520,15 +539,42 @@ func TestWiringProblems(t *testing.T) {
 			want: "never runs it",
 		},
 		{
-			name: "before-make",
-			old:  "RUN make",
-			new:  "COPY test/ffmpeg-check.sh /tmp/ffmpeg-check.sh\nRUN /tmp/ffmpeg-check.sh /out\nRUN make",
-			want: "before make builds",
+			name: "before-the-carrier-copy",
+			old:  carrier,
+			new:  "COPY test/ffmpeg-check.sh /tmp/ffmpeg-check.sh\nRUN /tmp/ffmpeg-check.sh /out\n" + carrier,
+			want: "before the carrier's ffmpeg and ffprobe are copied in",
+		},
+		{
+			name: "ffprobe-not-copied-in",
+			old:  carrier, new: strings.Replace(carrier, " /bin/ffprobe", "", 1),
+			want: "before the carrier's ffmpeg and ffprobe are copied in",
+		},
+		{
+			name: "copied-in-from-another-image",
+			old:  carrier, new: strings.Replace(carrier, "ghcr.io/divbast/ffmpeg:lidarr", "docker.io/library/ffmpeg:7", 1),
+			want: "before the carrier's ffmpeg and ffprobe are copied in",
+		},
+		{
+			name: "copied-in-to-another-folder",
+			old:  carrier, new: strings.Replace(carrier, " /out/", " /src/", 1),
+			want: "before the carrier's ffmpeg and ffprobe are copied in",
+		},
+		{
+			// The runtime stage takes the binaries from the carrier, so
+			// what the check passed is not what ships
+			name: "shipped-from-the-carrier",
+			old:  shipped, new: "COPY --from=ghcr.io/divbast/ffmpeg:lidarr@sha256:0123 /bin/ffmpeg /bin/ffprobe /usr/local/bin/\n",
+			want: notCopy,
 		},
 		{
 			name: "more-after-the-check",
 			old:  check, new: check + "RUN strip /out/ffmpeg\n",
 			want: "runs more after the check",
+		},
+		{
+			name: "copy-into-the-folder-after-the-check",
+			old:  check, new: check + "COPY extra/ffmpeg /out/ffmpeg\n",
+			want: "copies into /out after the check",
 		},
 		{
 			name: "copied-from-another-folder",
@@ -625,6 +671,10 @@ func instructions(containerfile string) []instruction {
 	return out
 }
 
+// carrierImage is the carrier's repository and tag, which a COPY --from=
+// names with its digest after.
+const carrierImage = "ghcr.io/divbast/ffmpeg:lidarr@sha256:"
+
 // wiringProblems says what is wrong with how containerfile runs the
 // check, or nothing when it runs it where it must.
 func wiringProblems(containerfile string) []string {
@@ -652,20 +702,29 @@ func wiringProblems(containerfile string) []string {
 	}
 
 	var problems []string
-	makes := regexp.MustCompile(`(?:^|[\s;&|(])make(?:\s|$)`)
 	built := false
 	for i := checked - 1; i >= 0 && all[i].stage == stage; i-- {
-		if all[i].keyword == "RUN" && makes.MatchString(all[i].args) {
+		f := strings.Fields(all[i].args)
+		if all[i].keyword != "COPY" || len(f) < 3 || path.Clean(f[len(f)-1]) != dir {
+			continue
+		}
+		if slices.ContainsFunc(f, func(a string) bool { return strings.HasPrefix(a, "--from="+carrierImage) }) &&
+			slices.Contains(f[:len(f)-1], "/bin/ffmpeg") && slices.Contains(f[:len(f)-1], "/bin/ffprobe") {
 			built = true
 			break
 		}
 	}
 	if !built {
-		problems = append(problems, "the Containerfile runs the check before make builds the binaries it reads")
+		problems = append(problems, "the Containerfile runs the check before the carrier's ffmpeg and ffprobe are copied in to "+dir)
 	}
 	for i := checked + 1; i < len(all) && all[i].stage == stage; i++ {
 		if all[i].keyword == "RUN" {
 			problems = append(problems, "the Containerfile runs more after the check in its stage, so what ships may not be what it passed: "+all[i].args)
+		}
+		if f := strings.Fields(all[i].args); all[i].keyword == "COPY" && len(f) >= 2 {
+			if to := path.Clean(f[len(f)-1]); to == dir || strings.HasPrefix(to, dir+"/") {
+				problems = append(problems, "the Containerfile copies into "+dir+" after the check in its stage, so what ships may not be what it passed: "+all[i].args)
+			}
 		}
 	}
 

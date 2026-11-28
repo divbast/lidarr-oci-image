@@ -43,32 +43,6 @@
       "currentValueTemplate": "v{{{currentValue}}}",
       "versioningTemplate": "regex:^v(?<major>\\d+)\\.(?<minor>\\d+)\\.(?<patch>\\d+)\\.(?<build>\\d+)$",
       "autoReplaceStringTemplate": "# LIDARR_STABLE_V4={{{replace '^v' '' newValue}}}"
-    },
-    {
-      "customType": "regex",
-      "description": "ARG FFMPEG_VERSION and the ARG FFMPEG_COMMIT beneath it, captured together so one PR moves both, from FFmpeg's tags. Its digest is the commit the tag names, which the ffmpeg stage checks out and asserts the tag still names. The versioning reads release tags alone, n9.0.2 or n9.1, so a development tag such as n9.1-dev never matches. The two ARGs must stay adjacent and in this order.",
-      "managerFilePatterns": [
-        "/^Containerfile$/"
-      ],
-      "matchStrings": [
-        "ARG FFMPEG_VERSION=(?<currentValue>\\S+)\\nARG FFMPEG_COMMIT=(?<currentDigest>[0-9a-f]{40})"
-      ],
-      "depNameTemplate": "FFmpeg/FFmpeg",
-      "datasourceTemplate": "github-tags",
-      "versioningTemplate": "regex:^n(?<major>\\d+)\\.(?<minor>\\d+)(\\.(?<patch>\\d+))?$",
-      "autoReplaceStringTemplate": "ARG FFMPEG_VERSION={{{newValue}}}\nARG FFMPEG_COMMIT={{{newDigest}}}"
-    },
-    {
-      "customType": "regex",
-      "description": "The codec libraries the ffmpeg stage installs, each pinned name=version on a line of its own, to a Docker Hardened Images build, whose version ends +dhiN. They come from DHI's own Debian repository, the one the stage's apt reads them from, whose amd64 and arm64 indexes carry the same versions. DHI deletes a superseded build, so a pin left behind fails the build until this moves it.",
-      "managerFilePatterns": [
-        "/^Containerfile$/"
-      ],
-      "matchStrings": [
-        " (?<depName>[a-z0-9][a-z0-9.+-]*)=(?<currentValue>[^\\s=]+\\+dhi\\d+) \\\\"
-      ],
-      "datasourceTemplate": "deb",
-      "registryUrlTemplate": "https://dhi.io/deb/debian/main?suite=trixie&components=main&binaryArch=amd64"
     }
   ],
   "packageRules": [
@@ -103,32 +77,6 @@
       "prBodyNotes": [
         "Lidarr has published a stable v4 release, so this pull request stays red, and the nightly line stops here: move the image to stable as CLAUDE.md's 'Moving to stable' says."
       ]
-    },
-    {
-      "description": "FFmpeg, outside the Lidarr group, so stopping the nightly line at v4 stable never holds it back. Its releases merge once every check passes, majors among them: the ffmpeg stage's check and the acceptance suite's transcodes are what hold one back.",
-      "matchDepNames": [
-        "FFmpeg/FFmpeg"
-      ],
-      "labels": [
-        "ffmpeg"
-      ],
-      "commitMessagePrefix": "ffmpeg:",
-      "automerge": true
-    },
-    {
-      "description": "The codec libraries move together, in one pull request, and merge once every check passes.",
-      "matchDatasources": [
-        "deb"
-      ],
-      "matchManagers": [
-        "custom.regex"
-      ],
-      "groupName": "ffmpeg libraries",
-      "labels": [
-        "ffmpeg"
-      ],
-      "commitMessagePrefix": "ffmpeg:",
-      "automerge": true
     }
   ]
 }
